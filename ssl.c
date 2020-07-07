@@ -1,34 +1,36 @@
-/*
+/*-
  * SSLsplit - transparent SSL/TLS interception
- * Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
- * All rights reserved.
  * https://www.roe.ch/SSLsplit
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+ * All rights reserved.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "ssl.h"
 
 #include "log.h"
 #include "defaults.h"
+#include "attrib.h"
 
 #include <sys/types.h>
 #include <fcntl.h>
@@ -38,7 +40,9 @@
 #include <limits.h>
 
 #include <openssl/crypto.h>
+#ifndef OPENSSL_NO_ENGINE
 #include <openssl/engine.h>
+#endif /* !OPENSSL_NO_ENGINE */
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
@@ -88,35 +92,32 @@ ssl_ssl_cert_get(SSL *s)
 }
 #endif /* OpenSSL 0.9.8y, 1.0.0k or 1.0.1e */
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
 int
 DH_set0_pqg(DH *dh, BIGNUM *p, BIGNUM *q, BIGNUM *g)
 {
-    /* If the fields p and g in d are NULL, the corresponding input
-     * parameters MUST be non-NULL.  q may remain NULL.
-     */
-    if ((dh->p == NULL && p == NULL)
-        || (dh->g == NULL && g == NULL))
-        return 0;
+	/*
+	 * If the fields p and g in d are NULL, the corresponding input
+	 * parameters MUST be non-NULL.  q may remain NULL.
+	 */
+	if ((dh->p == NULL && p == NULL) || (dh->g == NULL && g == NULL))
+		return 0;
 
-    if (p != NULL) {
-        BN_free(dh->p);
-        dh->p = p;
-    }
-    if (q != NULL) {
-        BN_free(dh->q);
-        dh->q = q;
-    }
-    if (g != NULL) {
-        BN_free(dh->g);
-        dh->g = g;
-    }
+	if (p != NULL) {
+		BN_free(dh->p);
+		dh->p = p;
+	}
+	if (q != NULL) {
+		BN_free(dh->q);
+		dh->q = q;
+		dh->length = BN_num_bits(q);
+	}
+	if (g != NULL) {
+		BN_free(dh->g);
+		dh->g = g;
+	}
 
-    if (q != NULL) {
-        dh->length = BN_num_bits(q);
-    }
-
-    return 1;
+	return 1;
 }
 #endif
 
@@ -147,12 +148,12 @@ ssl_openssl_version(void)
 		                "---------------------------------------\n");
 	}
 #ifdef LIBRESSL_VERSION_NUMBER
-	fprintf(stderr, "LibreSSL detected: %s (%lx)\n",
+	fprintf(stderr, "OpenSSL API provided by LibreSSL: %s (%lx)\n",
 	                LIBRESSL_VERSION_TEXT,
 	                (long unsigned int)LIBRESSL_VERSION_NUMBER);
 #endif /* LIBRESSL_VERSION_NUMBER */
 #ifdef OPENSSL_IS_BORINGSSL
-	fprintf(stderr, "BoringSSL detected\n")
+	fprintf(stderr, "OpenSSL API provided by BoringSSL\n")
 #endif /* OPENSSL_IS_BORINGSSL */
 #ifndef OPENSSL_NO_TLSEXT
 	fprintf(stderr, "OpenSSL has support for TLS extensions\n"
@@ -170,6 +171,11 @@ ssl_openssl_version(void)
 #else /* !OPENSSL_THREADS */
 	fprintf(stderr, "OpenSSL is not thread-safe\n");
 #endif /* !OPENSSL_THREADS */
+#ifndef OPENSSL_NO_ENGINE
+	fprintf(stderr, "OpenSSL has engine support\n");
+#else /* OPENSSL_NO_ENGINE */
+	fprintf(stderr, "OpenSSL has no engine support\n");
+#endif /* OPENSSL_NO_ENGINE */
 #ifdef SSL_MODE_RELEASE_BUFFERS
 	fprintf(stderr, "Using SSL_MODE_RELEASE_BUFFERS\n");
 #else /* !SSL_MODE_RELEASE_BUFFERS */
@@ -263,7 +269,7 @@ ssl_openssl_version(void)
  */
 static int ssl_initialized = 0;
 
-#if defined(OPENSSL_THREADS) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if defined(OPENSSL_THREADS) && ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 struct CRYPTO_dynlock_value {
 	pthread_mutex_t mutex;
 };
@@ -362,16 +368,29 @@ ssl_init(void)
 		return 0;
 
 	/* general initialization */
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG
+#ifndef OPENSSL_NO_ENGINE
+	                    |OPENSSL_INIT_ENGINE_ALL_BUILTIN
+#endif /* !OPENSSL_NO_ENGINE */
+	                    , NULL);
+	OPENSSL_init_ssl(0, NULL);
+#else /* OPENSSL_VERSION_NUMBER < 0x10100000L */
 	SSL_library_init();
+#endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
+
 #ifdef PURIFY
 	CRYPTO_malloc_init();
 	CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_ON);
 #endif /* PURIFY */
 	SSL_load_error_strings();
 	OpenSSL_add_all_algorithms();
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
+	OPENSSL_config(NULL);
+#endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
 
 	/* thread-safety */
-#if defined(OPENSSL_THREADS) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if defined(OPENSSL_THREADS) && ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 	ssl_mutex_num = CRYPTO_num_locks();
 	ssl_mutex = malloc(ssl_mutex_num * sizeof(*ssl_mutex));
 	for (int i = 0; i < ssl_mutex_num; i++) {
@@ -389,7 +408,7 @@ ssl_init(void)
 #else /* !OPENSSL_NO_THREADID */
 	CRYPTO_THREADID_set_callback(ssl_thr_id_cb);
 #endif /* !OPENSSL_NO_THREADID */
-#endif /* OPENSSL_THREADS */
+#endif /* OPENSSL_THREADS && OPENSSL_VERSION_NUMBER < 0x10100000L */
 
 	/* randomness */
 #ifndef PURIFY
@@ -440,7 +459,7 @@ ssl_reinit(void)
 	if (!ssl_initialized)
 		return 0;
 
-#if defined(OPENSSL_THREADS) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if defined(OPENSSL_THREADS) && ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 	for (int i = 0; i < ssl_mutex_num; i++) {
 		if (pthread_mutex_init(&ssl_mutex[i], NULL)) {
 			return -1;
@@ -461,11 +480,12 @@ ssl_fini(void)
 	if (!ssl_initialized)
 		return;
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
 	ERR_remove_state(0); /* current thread */
 #endif
 
-#if defined(OPENSSL_THREADS) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if defined(OPENSSL_THREADS) && \
+    ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 	CRYPTO_set_locking_callback(NULL);
 	CRYPTO_set_dynlock_create_callback(NULL);
 	CRYPTO_set_dynlock_lock_callback(NULL);
@@ -481,7 +501,10 @@ ssl_fini(void)
 	free(ssl_mutex);
 #endif
 
+#if !defined(OPENSSL_NO_ENGINE) && \
+    ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 	ENGINE_cleanup();
+#endif /* !OPENSSL_NO_ENGINE && OPENSSL_VERSION_NUMBER < 0x10100000L */
 	CONF_modules_finish();
 	CONF_modules_unload(1);
 	CONF_modules_free();
@@ -489,7 +512,30 @@ ssl_fini(void)
 	EVP_cleanup();
 	ERR_free_strings();
 	CRYPTO_cleanup_all_ex_data();
+
+	ssl_initialized = 0;
 }
+
+/*
+ * Look up an OpenSSL engine by ID or by full path and load it as default
+ * engine.  This works globally, not on specific SSL_CTX or SSL instances.
+ * OpenSSL must already have been initialized when calling this function.
+ * Returns 0 on success, -1 on failure.
+ */
+#ifndef OPENSSL_NO_ENGINE
+int
+ssl_engine(const char *name) {
+	ENGINE *engine;
+
+	engine = ENGINE_by_id(name);
+	if (!engine)
+		return -1;
+
+	if (!ENGINE_set_default(engine, ENGINE_METHOD_ALL))
+		return -1;
+	return 0;
+}
+#endif /* !OPENSSL_NO_ENGINE */
 
 /*
  * Format raw SHA1 hash into newly allocated string, with or without colons.
@@ -501,7 +547,7 @@ ssl_sha1_to_str(unsigned char *rawhash, int colons)
 	int rv;
 
 	rv = asprintf(&str, colons ?
-	              "%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X"
+	              "%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X:"
 	              "%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X" :
 	              "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X"
 	              "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
@@ -552,7 +598,7 @@ ssl_ssl_masterkey_to_str(SSL *ssl)
 	char *str = NULL;
 	int rv;
 	unsigned char *k, *r;
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
 	unsigned char kbuf[48], rbuf[32];
 	k = &kbuf[0];
 	r = &rbuf[0];
@@ -828,7 +874,7 @@ ssl_rand(void *p, size_t sz)
 {
 	int rv;
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
 	rv = RAND_pseudo_bytes((unsigned char*)p, sz);
 	if (rv == 1)
 		return 0;
@@ -877,6 +923,36 @@ ssl_x509_serial_copyrand(X509 *dstcrt, X509 *srccrt)
 		BN_free(bnserial);
 	}
 	return 0;
+}
+
+/*
+ * Returns the appropriate key usage strings for the type of server key.
+ * Return value should conceptually be const, but OpenSSL does not use const
+ * appropriately.
+ */
+static char *
+ssl_key_usage_for_key(EVP_PKEY *key)
+{
+	switch (EVP_PKEY_type(EVP_PKEY_base_id(key))) {
+#ifndef OPENSSL_NO_RSA
+	case EVP_PKEY_RSA:
+		return "keyEncipherment,digitalSignature";
+#endif /* !OPENSSL_NO_RSA */
+#ifndef OPENSSL_NO_DH
+	case EVP_PKEY_DH:
+		return "keyAgreement";
+#endif /* !OPENSSL_NO_DH */
+#ifndef OPENSSL_NO_DSA
+	case EVP_PKEY_DSA:
+		return "digitalSignature";
+#endif /* !OPENSSL_NO_DSA */
+#ifndef OPENSSL_NO_ECDSA
+	case EVP_PKEY_EC:
+		return "digitalSignature,keyAgreement";
+#endif /* !OPENSSL_NO_ECDSA */
+	default:
+		return "keyEncipherment,keyAgreement,digitalSignature";
+	}
 }
 
 /*
@@ -932,12 +1008,9 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 	if (rv == -1)
 		goto errout;
 
-	rv = ssl_x509_v3ext_copy_by_nid(crt, origcrt,
-	                                NID_key_usage);
-	if (rv == 0)
-		rv = ssl_x509_v3ext_add(&ctx, crt, "keyUsage",
-		                                   "digitalSignature,"
-		                                   "keyEncipherment");
+	/* key usage depends on the key type, do not copy from original */
+	rv = ssl_x509_v3ext_add(&ctx, crt, "keyUsage",
+	                        ssl_key_usage_for_key(key));
 	if (rv == -1)
 		goto errout;
 
@@ -1006,7 +1079,7 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 		}
 	}
 #ifdef DEBUG_CERTIFICATE
-	ssl_x509_v3ext_add(&ctx, crt, "nsComment", "Generated by " PNAME);
+	ssl_x509_v3ext_add(&ctx, crt, "nsComment", "Generated by " PKGLABEL);
 #endif /* DEBUG_CERTIFICATE */
 
 	const EVP_MD *md;
@@ -1019,6 +1092,9 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 			break;
 		case NID_ripemd160WithRSA:
 			md = EVP_ripemd160();
+			break;
+		case NID_sha1WithRSAEncryption:
+			md = EVP_sha1();
 			break;
 		case NID_sha224WithRSAEncryption:
 			md = EVP_sha224();
@@ -1037,9 +1113,8 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 			md = EVP_sha();
 			break;
 #endif /* !OPENSSL_NO_SHA0 */
-		case NID_sha1WithRSAEncryption:
 		default:
-			md = EVP_sha1();
+			md = EVP_sha256();
 			break;
 		}
 		break;
@@ -1047,6 +1122,10 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 #ifndef OPENSSL_NO_DSA
 	case EVP_PKEY_DSA:
 		switch (X509_get_signature_nid(origcrt)) {
+		case NID_dsaWithSHA1:
+		case NID_dsaWithSHA1_2:
+			md = EVP_sha1();
+			break;
 		case NID_dsa_with_SHA224:
 			md = EVP_sha224();
 			break;
@@ -1058,10 +1137,8 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 			md = EVP_sha();
 			break;
 #endif /* !OPENSSL_NO_SHA0 */
-		case NID_dsaWithSHA1:
-		case NID_dsaWithSHA1_2:
 		default:
-			md = EVP_sha1();
+			md = EVP_sha256();
 			break;
 		}
 		break;
@@ -1069,6 +1146,9 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 #ifndef OPENSSL_NO_ECDSA
 	case EVP_PKEY_EC:
 		switch (X509_get_signature_nid(origcrt)) {
+		case NID_ecdsa_with_SHA1:
+			md = EVP_sha1();
+			break;
 		case NID_ecdsa_with_SHA224:
 			md = EVP_sha224();
 			break;
@@ -1081,9 +1161,8 @@ ssl_x509_forge(X509 *cacrt, EVP_PKEY *cakey, X509 *origcrt, EVP_PKEY *key,
 		case NID_ecdsa_with_SHA512:
 			md = EVP_sha512();
 			break;
-		case NID_ecdsa_with_SHA1:
 		default:
-			md = EVP_sha1();
+			md = EVP_sha256();
 			break;
 		}
 		break;
@@ -1151,9 +1230,9 @@ ssl_x509chain_load(X509 **crt, STACK_OF(X509) **chain, const char *filename)
 			goto leave3;
 	}
 
-#if (OPENSSL_VERSION_NUMBER < 0x1000200fL) || defined(LIBRESSL_VERSION_NUMBER)
+#if (OPENSSL_VERSION_NUMBER < 0x1000200fL) || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x20902000L)
 	tmpchain = tmpctx->extra_certs;
-#else /* OpenSSL >= 1.0.2 */
+#else /* OpenSSL >= 1.0.2 || LIBRESSL_VERSION_NUMBER >= 0x20902000L */
 	rv = SSL_CTX_get0_chain_certs(tmpctx, &tmpchain);
 	if (rv != 1)
 		goto leave3;
@@ -1188,18 +1267,21 @@ leave1:
  * Copies the certificate stack to the SSL_CTX internal data structures
  * and increases reference counts accordingly.
  */
-void
+int
 ssl_x509chain_use(SSL_CTX *sslctx, X509 *crt, STACK_OF(X509) *chain)
 {
-	SSL_CTX_use_certificate(sslctx, crt);
+	if (SSL_CTX_use_certificate(sslctx, crt) != 1)
+		return -1;
 
 	for (int i = 0; i < sk_X509_num(chain); i++) {
 		X509 *tmpcrt;
 
 		tmpcrt = sk_X509_value(chain, i);
 		ssl_x509_refcount_inc(tmpcrt);
-		SSL_CTX_add_extra_chain_cert(sslctx, tmpcrt);
+		if (SSL_CTX_add_extra_chain_cert(sslctx, tmpcrt) != 1)
+			return -1;
 	}
+	return 0;
 }
 
 /*
@@ -1282,7 +1364,7 @@ ssl_key_genrsa(const int keysize)
 	EVP_PKEY *pkey;
 	RSA *rsa;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
 	BIGNUM *bn;
 	int rv;
 	rsa = RSA_new();
@@ -1418,7 +1500,7 @@ ssl_x509_fingerprint(X509 *crt, int colons)
 void
 ssl_dh_refcount_inc(DH *dh)
 {
-#if defined(OPENSSL_THREADS) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if defined(OPENSSL_THREADS) && ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 	CRYPTO_add(&dh->references, 1, CRYPTO_LOCK_DH);
 #else /* !OPENSSL_THREADS */
 	DH_up_ref(dh);
@@ -1433,7 +1515,7 @@ ssl_dh_refcount_inc(DH *dh)
 void
 ssl_key_refcount_inc(EVP_PKEY *key)
 {
-#if defined(OPENSSL_THREADS) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if defined(OPENSSL_THREADS) && ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 	CRYPTO_add(&key->references, 1, CRYPTO_LOCK_EVP_PKEY);
 #else /* !OPENSSL_THREADS */
 	EVP_PKEY_up_ref(key);
@@ -1448,7 +1530,7 @@ ssl_key_refcount_inc(EVP_PKEY *key)
 void
 ssl_x509_refcount_inc(X509 *crt)
 {
-#if defined(OPENSSL_THREADS) && OPENSSL_VERSION_NUMBER < 0x10100000L
+#if defined(OPENSSL_THREADS) && ((OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER))
 	CRYPTO_add(&crt->references, 1, CRYPTO_LOCK_X509);
 #else /* !OPENSSL_THREADS */
 	X509_up_ref(crt);
@@ -1665,6 +1747,7 @@ ssl_x509_names_to_str(X509 *crt)
 		sz += strlen(*p) + 1;
 	}
 	if (!sz) {
+		buf = strdup("-");
 		goto out1;
 	}
 
@@ -1853,7 +1936,7 @@ ssl_session_to_str(SSL_SESSION *sess)
 
 /*
  * Returns non-zero if the session timeout has not expired yet,
- * zero if the session has expired or an error occured.
+ * zero if the session has expired or an error occurred.
  */
 int
 ssl_session_is_valid(SSL_SESSION *sess)
@@ -1897,7 +1980,7 @@ ssl_is_ocspreq(const unsigned char *buf, size_t sz)
  *
  * The OpenSSL SNI API only allows to read the indicated server name at the
  * time when we have to provide the server certificate.  OpenSSL does not
- * allow to asynchroniously read the indicated server name, wait for some
+ * allow to asynchronously read the indicated server name, wait for some
  * unrelated event to happen, and then later to provide the server certificate
  * to use and continue the handshake.  Therefore we resort to parsing the
  * server name from the ClientHello manually before OpenSSL gets to work on it.
@@ -1926,12 +2009,11 @@ ssl_is_ocspreq(const unsigned char *buf, size_t sz)
  * message beginning at offsets >= 0, whereas if search is zero, only
  * ClientHello messages starting at offset 0 will be considered.
  *
- * Note that this code currently only supports SSL 3.0 and TLS 1.0-1.2 and that
- * it expects the ClientHello message to be unfragmented in a single record.
- *
- * TODO - implement SSL 2.0 ClientHello parsing to support old STARTTLS clients
+ * This code currently supports SSL 2.0, SSL 3.0 and TLS 1.0-1.2.
  *
  * References:
+ * draft-hickman-netscape-ssl-00: The SSL Protocol
+ * RFC 6101: The Secure Sockets Layer (SSL) Protocol Version 3.0
  * RFC 2246: The TLS Protocol Version 1.0
  * RFC 3546: Transport Layer Security (TLS) Extensions
  * RFC 4346: The Transport Layer Security (TLS) Protocol Version 1.1
@@ -1972,8 +2054,8 @@ ssl_tls_clienthello_parse(const unsigned char *buf, ssize_t sz, int search,
 		}
 
 		if (search) {
-			/* Search for the beginning of a potential ClientHello */
-			while ((n > 0) && (*p != 22)) {
+			/* Search for a potential ClientHello */
+			while ((n > 0) && (*p != 0x16) && (*p != 0x80)) {
 				p++; n--;
 			}
 			if (n <= 0) {
@@ -1981,7 +2063,8 @@ ssl_tls_clienthello_parse(const unsigned char *buf, ssize_t sz, int search,
 				 * clienthello to NULL to indicate to the
 				 * caller that this buffer does not need to be
 				 * retried */
-				DBG_printf("===> No match: rv 1, *clienthello NULL\n");
+				DBG_printf("===> No match:"
+				           " rv 1, *clienthello NULL\n");
 				*clienthello = NULL;
 				return 1;
 			}
@@ -1990,9 +2073,68 @@ ssl_tls_clienthello_parse(const unsigned char *buf, ssize_t sz, int search,
 		DBG_printf("candidate at offset %td\n", p - buf);
 
 		DBG_printf("byte 0: %02x\n", *p);
-		/* +0 0x80 +2 0x01 SSLv2 clientHello;
-		 * +0 0x22 +1 0x03 SSLv3/TLSv1.x clientHello */
-		if (*p != 22) { /* record type: handshake protocol */
+		/* +0 0x80 +2 0x01 SSLv2 short header, clientHello;
+		 * +0 0x16 +1 0x03 SSLv3/TLSv1.x handshake, clientHello */
+		if (*p == 0x80) {
+			/* SSLv2 handled here */
+			p++; n--;
+
+			if (n < 10) { /* length + 9 */
+				DBG_printf("===> [SSLv2] Truncated:"
+				           " rv 1, *clienthello set\n");
+				return 1;
+			}
+
+			DBG_printf("length: %02x\n", p[0]);
+			if (n - 1 < p[0]) {
+				DBG_printf("===> [SSLv2] Truncated:"
+				           " rv 1, *clienthello set\n");
+				return 1;
+			}
+			p++; n--;
+
+			DBG_printf("msgtype: %02x\n", p[0]);
+			if (*p != 0x01)
+				continue;
+			p++; n--;
+
+			DBG_printf("version: %02x %02x\n", p[0], p[1]);
+			/* byte order is actually swapped for SSLv2 */
+			if (!(
+#ifdef HAVE_SSLV2
+			      (p[0] == 0x00 && p[1] == 0x02) ||
+#endif /* HAVE_SSLV2 */
+			      (p[0] == 0x03 && p[1] <= 0x03)))
+				continue;
+			p += 2; n -= 2;
+
+			DBG_printf("cipher-spec-len: %02x %02x\n", p[0], p[1]);
+			ssize_t cipherspec_len = p[0] << 8 | p[1];
+			p += 2; n -= 2;
+
+			DBG_printf("session-id-len: %02x %02x\n", p[0], p[1]);
+			ssize_t sessionid_len = p[0] << 8 | p[1];
+			p += 2; n -= 2;
+
+			DBG_printf("challenge-len: %02x %02x\n", p[0], p[1]);
+			ssize_t challenge_len = p[0] << 8 | p[1];
+			p += 2; n -= 2;
+			if (challenge_len < 16 || challenge_len > 32)
+				continue;
+
+			if (n < cipherspec_len
+			      + sessionid_len
+			      + challenge_len) {
+				DBG_printf("===> [SSLv2] Truncated:"
+				           " rv 1, *clienthello set\n");
+				return 1;
+			}
+
+			p += cipherspec_len + sessionid_len + challenge_len;
+			n -= cipherspec_len + sessionid_len + challenge_len;
+			goto done_parsing;
+		} else
+		if (*p != 0x16) {
 			/* this can only happen if search is 0 */
 			DBG_printf("===> No match: rv 1, *clienthello NULL\n");
 			*clienthello = NULL;
@@ -2009,7 +2151,7 @@ ssl_tls_clienthello_parse(const unsigned char *buf, ssize_t sz, int search,
 		 * updated for TLS 1.3 once that is standardized and still
 		 * compatible with this parser; remember to also update the
 		 * inner version check below */
-		if (p[0] != 0x03 && p[1] > 0x03)
+		if (p[0] != 0x03 || p[1] > 0x03)
 			continue;
 		p += 2; n -= 2;
 
@@ -2190,6 +2332,8 @@ ssl_tls_clienthello_parse(const unsigned char *buf, ssize_t sz, int search,
 			n -= extlen;
 		} /* while have more extensions */
 
+done_parsing:
+		;
 #ifdef DEBUG_CLIENTHELLO_PARSER
 		if (n > 0) {
 			DBG_printf("unparsed next bytes %02x %02x %02x %02x\n",
@@ -2204,7 +2348,7 @@ ssl_tls_clienthello_parse(const unsigned char *buf, ssize_t sz, int search,
 			*servername = sn;
 		return 0;
 continue_search:
-	;
+		;
 	} while (search && n > 0);
 
 	/* No valid ClientHello messages found, not even a truncated one */

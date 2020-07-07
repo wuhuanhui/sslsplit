@@ -1,28 +1,29 @@
-/*
+/*-
  * SSLsplit - transparent SSL/TLS interception
- * Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
- * All rights reserved.
  * https://www.roe.ch/SSLsplit
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+ * All rights reserved.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "privsep.h"
@@ -64,12 +65,22 @@
 #define PRIVSEP_REQ_OPENFILE_P	2	/* open content log file w/mkpath */
 #define PRIVSEP_REQ_OPENSOCK	3	/* open socket and pass fd */
 #define PRIVSEP_REQ_CERTFILE	4	/* open cert file in certgendir */
+
 /* response byte */
 #define PRIVSEP_ANS_SUCCESS	0	/* success */
 #define PRIVSEP_ANS_UNK_CMD	1	/* unknown command */
 #define PRIVSEP_ANS_INVALID	2	/* invalid message */
 #define PRIVSEP_ANS_DENIED	3	/* request denied */
 #define PRIVSEP_ANS_SYS_ERR	4	/* system error; arg=errno */
+
+/* Whether we short-circuit calls to privsep_client_* directly to
+ * privsep_server_* within the client process, bypassing the privilege
+ * separation mechanism; this is a performance optimization for use cases
+ * where the user chooses performance over security, especially with options
+ * that require privsep operations for each connection passing through.
+ * In the current implementation, for consistency, we still fork normally, but
+ * will not actually send any privsep requests to the parent process. */
+static int privsep_fastpath;
 
 /* communication with signal handler */
 static volatile sig_atomic_t received_sighup;
@@ -86,11 +97,12 @@ privsep_server_signal_handler(int sig)
 {
 	int saved_errno;
 
+	saved_errno = errno;
+
 #ifdef DEBUG_PRIVSEP_SERVER
 	log_dbg_printf("privsep_server_signal_handler\n");
 #endif /* DEBUG_PRIVSEP_SERVER */
 
-	saved_errno = errno;
 	switch (sig) {
 	case SIGHUP:
 		received_sighup = 1;
@@ -134,53 +146,89 @@ privsep_server_signal_handler(int sig)
 }
 
 static int WUNRES
-privsep_server_openfile_verify(opts_t *opts, char *fn, int mkpath)
+privsep_server_openfile_verify(opts_t *opts, const char *fn, UNUSED int mkpath)
 {
-	if (mkpath && !opts->contentlog_isspec)
+	/* Prefix must match one of the active log files that use privsep. */
+	do {
+		if (opts->contentlog) {
+			if (strstr(fn, opts->contentlog_isspec
+			               ? opts->contentlog_basedir
+			               : opts->contentlog) == fn)
+				break;
+		}
+		if (opts->pcaplog) {
+			if (strstr(fn, opts->pcaplog_isspec
+			               ? opts->pcaplog_basedir
+			               : opts->pcaplog) == fn)
+				break;
+		}
+		if (opts->connectlog) {
+			if (strstr(fn, opts->connectlog) == fn)
+				break;
+		}
+		if (opts->masterkeylog) {
+			if (strstr(fn, opts->masterkeylog) == fn)
+				break;
+		}
 		return -1;
-	if (!mkpath && !opts->contentlog_isdir)
+	} while (0);
+
+	/* Path must not contain dot-dot to prevent escaping the prefix. */
+	if (strstr(fn, "/../"))
 		return -1;
-	if (strstr(fn, mkpath ? opts->contentlog_basedir
-	                      : opts->contentlog) != fn ||
-	    strstr(fn, "/../"))
-		return -1;
+
 	return 0;
 }
 
 static int WUNRES
-privsep_server_openfile(char *fn, int mkpath)
+privsep_server_openfile(const char *fn, int mkpath)
 {
-	int fd;
+	int fd, tmp;
 
 	if (mkpath) {
 		char *filedir, *fn2;
 
 		fn2 = strdup(fn);
 		if (!fn2) {
+			tmp = errno;
 			log_err_printf("Could not duplicate filname: %s (%i)\n",
 			               strerror(errno), errno);
+			errno = tmp;
 			return -1;
 		}
 		filedir = dirname(fn2);
 		if (!filedir) {
+			tmp = errno;
 			log_err_printf("Could not get dirname: %s (%i)\n",
 			               strerror(errno), errno);
 			free(fn2);
+			errno = tmp;
 			return -1;
 		}
 		if (sys_mkpath(filedir, DFLT_DIRMODE) == -1) {
+			tmp = errno;
 			log_err_printf("Could not create directory '%s': %s (%i)\n",
 			               filedir, strerror(errno), errno);
 			free(fn2);
+			errno = tmp;
 			return -1;
 		}
 		free(fn2);
 	}
 
-	fd = open(fn, O_WRONLY|O_APPEND|O_CREAT, DFLT_FILEMODE);
+	fd = open(fn, O_RDWR|O_CREAT, DFLT_FILEMODE);
 	if (fd == -1) {
+		tmp = errno;
 		log_err_printf("Failed to open '%s': %s (%i)\n",
 		               fn, strerror(errno), errno);
+		errno = tmp;
+		return -1;
+	}
+	if (lseek(fd, 0, SEEK_END) == -1) {
+		tmp = errno;
+		log_err_printf("Failed to seek on '%s': %s (%i)\n",
+		               fn, strerror(errno), errno);
+		errno = tmp;
 		return -1;
 	}
 	return fd;
@@ -189,6 +237,8 @@ privsep_server_openfile(char *fn, int mkpath)
 static int WUNRES
 privsep_server_opensock_verify(opts_t *opts, void *arg)
 {
+	/* This check is safe, because modifications of the spec in the child
+	 * process do not affect the copy of the spec here in the parent. */
 	for (proxyspec_t *spec = opts->spec; spec; spec = spec->next) {
 		if (spec == arg)
 			return 0;
@@ -197,7 +247,7 @@ privsep_server_opensock_verify(opts_t *opts, void *arg)
 }
 
 static int WUNRES
-privsep_server_opensock(proxyspec_t *spec)
+privsep_server_opensock(const proxyspec_t *spec)
 {
 	evutil_socket_t fd;
 	int on = 1;
@@ -253,7 +303,7 @@ privsep_server_opensock(proxyspec_t *spec)
 }
 
 static int WUNRES
-privsep_server_certfile_verify(opts_t *opts, char *fn)
+privsep_server_certfile_verify(opts_t *opts, const char *fn)
 {
 	if (!opts->certgendir)
 		return -1;
@@ -263,7 +313,7 @@ privsep_server_certfile_verify(opts_t *opts, char *fn)
 }
 
 static int WUNRES
-privsep_server_certfile(char *fn)
+privsep_server_certfile(const char *fn)
 {
 	int fd;
 
@@ -311,6 +361,7 @@ privsep_server_handle_req(opts_t *opts, int srvsock)
 	}
 	case PRIVSEP_REQ_OPENFILE_P:
 		mkpath = 1;
+		/* fall through */
 	case PRIVSEP_REQ_OPENFILE: {
 		char *fn;
 		int fd;
@@ -656,6 +707,9 @@ privsep_client_openfile(int clisock, const char *fn, int mkpath)
 	int fd = -1;
 	ssize_t n;
 
+	if (privsep_fastpath)
+		return privsep_server_openfile(fn, mkpath);
+
 	req[0] = mkpath ? PRIVSEP_REQ_OPENFILE_P : PRIVSEP_REQ_OPENFILE;
 	memcpy(req + 1, fn, sizeof(req) - 1);
 
@@ -703,6 +757,9 @@ privsep_client_opensock(int clisock, const proxyspec_t *spec)
 	int fd = -1;
 	ssize_t n;
 
+	if (privsep_fastpath)
+		return privsep_server_opensock(spec);
+
 	req[0] = PRIVSEP_REQ_OPENSOCK;
 	*((const proxyspec_t **)&req[1]) = spec;
 
@@ -749,6 +806,9 @@ privsep_client_certfile(int clisock, const char *fn)
 	char req[1 + strlen(fn)];
 	int fd = -1;
 	ssize_t n;
+
+	if (privsep_fastpath)
+		return privsep_server_certfile(fn);
 
 	req[0] = PRIVSEP_REQ_CERTFILE;
 	memcpy(req + 1, fn, sizeof(req) - 1);
@@ -813,12 +873,20 @@ privsep_client_close(int clisock)
  * will not be touched.
  */
 int
-privsep_fork(opts_t *opts, int clisock[], size_t nclisock)
+privsep_fork(opts_t *opts, int clisock[], size_t nclisock, int *parent_rv)
 {
 	int selfpipev[2]; /* self-pipe trick: signal handler -> select */
 	int chldpipev[2]; /* el cheapo interprocess sync early after fork */
 	int sockcliv[nclisock][2];
 	pid_t pid;
+
+	if (!opts->dropuser) {
+		log_dbg_printf("Privsep fastpath enabled\n");
+		privsep_fastpath = 1;
+	} else {
+		log_dbg_printf("Privsep fastpath disabled\n");
+		privsep_fastpath = 0;
+	}
 
 	received_sigquit = 0;
 	received_sighup = 0;
@@ -852,6 +920,7 @@ privsep_fork(opts_t *opts, int clisock[], size_t nclisock)
 		               i, sockcliv[i][0], sockcliv[i][1]);
 	}
 
+	log_dbg_printf("Privsep parent pid %i\n", getpid());
 	pid = fork();
 	if (pid == -1) {
 		log_err_printf("Failed to fork: %s (%i)\n",
@@ -880,7 +949,7 @@ privsep_fork(opts_t *opts, int clisock[], size_t nclisock)
 			n = read(chldpipev[0], buf, sizeof(buf));
 		} while (n == -1 && errno == EINTR);
 		close(chldpipev[0]);
-
+		log_dbg_printf("Privsep child pid %i\n", getpid());
 		/* return the privsep client sockets */
 		for (size_t i = 0; i < nclisock; i++)
 			clisock[i] = sockcliv[i][1];
@@ -954,21 +1023,30 @@ privsep_fork(opts_t *opts, int clisock[], size_t nclisock)
 	close(selfpipev[1]);
 
 	int status;
-	wait(&status);
+	pid_t wpid;
+	wpid = wait(&status);
+	if (wpid != pid) {
+		/* should never happen, warn if it does anyway */
+		log_err_printf("Child pid %lld != expected %lld from wait(2)\n",
+		               (long long)wpid, (long long)pid);
+	}
 	if (WIFEXITED(status)) {
 		if (WEXITSTATUS(status) != 0) {
-			log_err_printf("Child proc %lld exited with status %d\n",
-			               (long long)pid, WEXITSTATUS(status));
+			log_err_printf("Child pid %lld exited with status %d\n",
+			               (long long)wpid, WEXITSTATUS(status));
 		} else {
-			log_dbg_printf("Child proc %lld exited with status %d\n",
-			               (long long)pid, WEXITSTATUS(status));
+			log_dbg_printf("Child pid %lld exited with status %d\n",
+			               (long long)wpid, WEXITSTATUS(status));
 		}
+		*parent_rv = WEXITSTATUS(status);
 	} else if (WIFSIGNALED(status)) {
-		log_err_printf("Child proc %lld killed by signal %d\n",
-		               (long long)pid, WTERMSIG(status));
+		log_err_printf("Child pid %lld killed by signal %d\n",
+		               (long long)wpid, WTERMSIG(status));
+		*parent_rv = 128 + WTERMSIG(status);
 	} else {
-		log_err_printf("Child proc %lld neither exited nor killed\n",
-		               (long long)pid);
+		/* can only happen with WUNTRACED option or active tracing */
+		log_err_printf("Child pid %lld neither exited nor killed\n",
+		               (long long)wpid);
 	}
 
 	return 1;

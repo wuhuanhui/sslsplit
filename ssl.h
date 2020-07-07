@@ -1,28 +1,29 @@
-/*
+/*-
  * SSLsplit - transparent SSL/TLS interception
- * Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
- * All rights reserved.
  * https://www.roe.ch/SSLsplit
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+ * All rights reserved.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef SSL_H
@@ -36,6 +37,15 @@
 #include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+
+/*
+ * LibreSSL seems to ship engine support on a source code level, but it seems
+ * to be broken.  Tested with LibreSSL 2.7.4 on OpenBSD and macOS.  For now,
+ * disable engine support when building against LibreSSL.
+ */
+#if defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_NO_ENGINE)
+#define OPENSSL_NO_ENGINE
+#endif
 
 #if (OPENSSL_VERSION_NUMBER < 0x10000000L) && !defined(OPENSSL_NO_THREADID)
 #define OPENSSL_NO_THREADID
@@ -65,16 +75,42 @@
 /*
  * SHA0 was removed in OpenSSL 1.1.0, including OPENSSL_NO_SHA0.
  */
-#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(OPENSSL_NO_SHA0)
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER) && !defined(OPENSSL_NO_SHA0)
 #define OPENSSL_NO_SHA0
 #endif
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(LIBRESSL_VERSION_NUMBER)
+#if LIBRESSL_VERSION_NUMBER >= 0x2050100fL
+#define SSL_is_server(ssl) ((ssl)->server)
+#else /* < LibreSSL 2.5.1 and OpenSSL < 1.1.0 */
+#define SSL_is_server(ssl) ((ssl)->type != SSL_ST_CONNECT)
+#endif /* < LibreSSL 2.5.1 and OpenSSL < 1.1.0 */
 #define ASN1_STRING_get0_data(value) ASN1_STRING_data(value)
-#define SSL_is_server(ssl) (ssl->type != SSL_ST_CONNECT)
 #define X509_get_signature_nid(x509) (OBJ_obj2nid(x509->sig_alg->algorithm))
 int DH_set0_pqg(DH *, BIGNUM *, BIGNUM *, BIGNUM *);
+#endif /* < OpenSSL 1.1.0 */
+
+#if OPENSSL_VERSION_NUMBER < 0x1000000fL
+static inline int EVP_PKEY_base_id(const EVP_PKEY *pkey)
+{
+	return EVP_PKEY_type(pkey->type);
+}
+static inline int X509_PUBKEY_get0_param(ASN1_OBJECT **ppkalg, const unsigned char **pk, int *ppklen, X509_ALGOR **pa, X509_PUBKEY *pub)
+{
+	if (ppkalg)
+		*ppkalg = pub->algor->algorithm;
+	if (pk) {
+		*pk = pub->public_key->data;
+		*ppklen = pub->public_key->length;
+	}
+	if (pa)
+		*pa = pub->algor;
+	return 1;
+}
+#ifndef X509_get_X509_PUBKEY
+#define X509_get_X509_PUBKEY(x) ((x)->cert_info->key
 #endif
+#endif /* OpenSSL < 1.0.0 */
 
 /*
  * The constructors returning a SSL_METHOD * were changed to return
@@ -163,6 +199,10 @@ int ssl_init(void) WUNRES;
 int ssl_reinit(void) WUNRES;
 void ssl_fini(void);
 
+#ifndef OPENSSL_NO_ENGINE
+int ssl_engine(const char *) WUNRES;
+#endif /* !OPENSSL_NO_ENGINE */
+
 char * ssl_sha1_to_str(unsigned char *, int) NONNULL(1) MALLOC;
 
 char * ssl_ssl_state_to_str(SSL *) NONNULL(1) MALLOC;
@@ -210,7 +250,8 @@ char * ssl_x509_to_pem(X509 *) NONNULL(1) MALLOC;
 void ssl_x509_refcount_inc(X509 *) NONNULL(1);
 
 int ssl_x509chain_load(X509 **, STACK_OF(X509) **, const char *) NONNULL(2,3);
-void ssl_x509chain_use(SSL_CTX *, X509 *, STACK_OF(X509) *) NONNULL(1,2,3);
+int ssl_x509chain_use(SSL_CTX *, X509 *, STACK_OF(X509) *)
+    NONNULL(1,2,3) WUNRES;
 
 char * ssl_session_to_str(SSL_SESSION *) NONNULL(1) MALLOC;
 int ssl_session_is_valid(SSL_SESSION *) NONNULL(1);

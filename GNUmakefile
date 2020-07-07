@@ -5,32 +5,65 @@
 #
 # Dependencies and features are auto-detected, but can be overridden:
 #
-# OPENSSL_BASE	Prefix of OpenSSL library and headers to build against
-# LIBEVENT_BASE	Prefix of libevent library and headers to build against
-# CHECK_BASE	Prefix of check library and headers to build against (optional)
-# PKGCONFIG	Name/path of pkg-config program to use for auto-detection
-# PCFLAGS	Additional pkg-config flags
-# XNU_VERSION	Version of included XNU headers to build against (OS X only)
-# FEATURES	Enable optional or force-enable undetected features (see below)
+# OPENSSL_BASE  Prefix of OpenSSL library and headers to build against
+# LIBEVENT_BASE Prefix of libevent library and headers to build against
+# LIBPCAP_BASE  Prefix of libpcap library and headers to build against
+# LIBNET_BASE   Prefix of libnet library and headers to build against
+# CHECK_BASE    Prefix of check library and headers to build against (optional)
+# PKGCONFIG     Name/path of pkg-config program to use for auto-detection
+# PCFLAGS       Additional pkg-config flags
+# XNU_VERSION   Version of included XNU headers to build against (OS X only)
+# FEATURES      Enable optional or force-enable undetected features (see below)
 #
 # Where and how to install to:
 #
-# PREFIX	Prefix to install under (default /usr/local)
-# DESTDIR	Destination root under which prefix is located (default /)
-# MANDIR	Subdir of PREFIX that contains man section dirs
-# INSTALLUID	UID to use for installed files if installing as root
-# INSTALLGID	GID to use for installed files if installing as root
+# PREFIX        Prefix to install under (default /usr/local)
+# DESTDIR       Destination root under which prefix is located (default /)
+# BINDIR        Path to user executables (default $(PREFIX)/bin)
+# MANDIR        Path to man section dirs (default $(PREFIX)/share/man)
+# SYSCONFDIR    Path to system configuration (default $(PREFIX)/etc)
+# INSTALLUID    UID to use for installed files if installing as root
+# INSTALLGID    GID to use for installed files if installing as root
 #
 # Standard compiler variables are respected, e.g.:
 #
-# CC		Compiler, e.g. for cross-compiling, ccache or ccc-analyzer
-# CFLAGS	Additional compiler flags, e.g. optimization flags
-# CPPFLAGS	Additional pre-processor flags
-# LDFLAGS	Additional linker flags
-# LIBS		Additional libraries to link against
+# CC            Compiler, e.g. for cross-compiling, ccache or ccc-analyzer
+# CFLAGS        Additional compiler flags, e.g. optimization flags
+# CPPFLAGS      Additional pre-processor flags
+# LDFLAGS       Additional linker flags
+# LIBS          Additional libraries to link against
+# SOURCE_DATE_EPOCH     Set to epoch time to make the build reproducible
 #
-# You can e.g. create a statically linked binary by running:
+# On macOS, the following build environment variables are respected:
+#
+# DEVELOPER_DIR         Override Xcode Command Line Developer Tools directory
+# MACOSX_VERSION_MIN    Minimal version of macOS to target, e.g. 10.11
+# SDK                   SDK name to build against, e.g. macosx, macosx10.11
+#
+# Examples:
+#
+# Build against custom installed libraries under /opt:
+# % OPENSSL_BASE=/opt/openssl LIBEVENT_BASE=/opt/libevent make
+#
+# Create a statically linked binary:
 # % PCFLAGS='--static' CFLAGS='-static' LDFLAGS='-static' make
+#
+# Build against musl libc that needs an additional library for fts(3):
+# % LIBS='-lfts' make
+#
+# Build a macOS binary for El Capitan using the default SDK from Xcode 7.3.1:
+# % MACOSX_VERSION_MIN=10.11 DEVELOPER_DIR=/Applications/Xcode-7.3.1.app/Contents/Developer make
+
+
+### Mirroring
+
+# Define to disable support for mirroring connection content as emulated
+# packets to a network interface (-I/-T options).  Doing so will remove the
+# dependency on both libnet and libpcap.  Use this for constrained environments
+# or on platforms without usable libnet/libpcap.  Logging connection content to
+# PCAP files will remain fully functional (-X/-Y/-y options) as it does not
+# make use of libnet and libpcap.
+#FEATURES+=	-DWITHOUT_MIRROR
 
 
 ### OpenSSL tweaking
@@ -41,9 +74,6 @@
 # messages.  If you build in SSLv2 support, you can disable it at runtime using
 # -R ssl2 to get the same result as not building in SSLv2 support at all.
 #FEATURES+=	-DWITH_SSLV2
-
-# Define to make SSLsplit set a session id context in server mode.
-#FEATURES+=	-DUSE_SSL_SESSION_ID_CONTEXT
 
 
 ### Debugging
@@ -74,6 +104,9 @@ DEBUG_CFLAGS?=	-g
 # Define to add privilege separation server event loop debugging.
 #FEATURES+=	-DDEBUG_PRIVSEP_SERVER
 
+# Define to add diagnostic output for debugging option parsing.
+#FEATURES+=	-DDEBUG_OPTS
+
 # When debugging OpenSSL related issues, make sure you use a debug build of
 # OpenSSL and consider enabling its debugging options -DREF_PRINT -DREF_CHECK
 # for debugging reference counting of OpenSSL objects and/or
@@ -92,6 +125,7 @@ DEBUG_CFLAGS?=	-g
 # Note that you can override the XNU headers used by defining XNU_VERSION.
 
 ifeq ($(shell uname),Darwin)
+include Mk/xcode.mk
 ifneq ($(wildcard /usr/include/libproc.h),)
 FEATURES+=	-DHAVE_DARWIN_LIBPROC
 endif
@@ -148,26 +182,36 @@ endif
 ### Variables you might need to override
 
 PREFIX?=	/usr/local
-MANDIR?=	share/man
+BINDIR?=	$(PREFIX)/bin
+SYSCONFDIR?=	$(PREFIX)/etc
+MANDIR?=	$(PREFIX)/share/man
 
 INSTALLUID?=	0
 INSTALLGID?=	0
 BINUID?=	$(INSTALLUID)
 BINGID?=	$(INSTALLGID)
 BINMODE?=	0755
+CNFUID?=	$(INSTALLUID)
+CNFGID?=	$(INSTALLGID)
+CNFMODE?=	0644
 MANUID?=	$(INSTALLUID)
 MANGID?=	$(INSTALLGID)
 MANMODE?=	0644
 ifeq ($(shell id -u),0)
 BINOWNERFLAGS?=	-o $(BINUID) -g $(BINGID)
+CNFOWNERFLAGS?=	-o $(CNFUID) -g $(CNFGID)
 MANOWNERFLAGS?=	-o $(MANUID) -g $(MANGID)
 else
 BINOWNERFLAGS?=	
+CNFOWNERFLAGS?=	
 MANOWNERFLAGS?=	
 endif
 
 OPENSSL?=	openssl
-PKGCONFIG?=	pkg-config
+PKGCONFIG?=	$(shell command -v pkg-config||echo false)
+ifeq ($(PKGCONFIG),false)
+$(warning pkg-config not found - guessing paths/flags for dependencies)
+endif
 
 BASENAME?=	basename
 CAT?=		cat
@@ -177,17 +221,19 @@ GREP?=		grep
 INSTALL?=	install
 MKDIR?=		mkdir
 SED?=		sed
+SORT?=		sort
 
 
 ### Variables only used for developer targets
 
 KHASH_URL?=	https://github.com/attractivechaos/klib/raw/master/khash.h
-GPGSIGNKEY?=	0xB5D3397E
+GPGSIGNKEY?=	0xE1520675375F5E35
 
 CPPCHECK?=	cppcheck
 GPG?=		gpg
 GIT?=		git
 WGET?=		wget
+DOCKER?=	docker
 
 BZIP2?=		bzip2
 COL?=		col
@@ -198,36 +244,24 @@ TAR?=		tar
 
 ### You should not need to touch anything below this line
 
-TARGET:=	sslsplit
-PNAME:=		SSLsplit
+PKGLABEL:=	SSLsplit
+PKGNAME:=	sslsplit
+TARGET:=	$(PKGNAME)
 SRCS:=		$(filter-out $(wildcard *.t.c),$(wildcard *.c))
 HDRS:=		$(wildcard *.h)
 OBJS:=		$(SRCS:.c=.o)
+MKFS=		$(wildcard GNUmakefile Mk/*.mk)
+FEATURES:=	$(sort $(FEATURES))
 
 TSRCS:=		$(wildcard *.t.c)
 TOBJS:=		$(TSRCS:.t.c=.t.o)
 TOBJS+=		$(filter-out main.o,$(OBJS))
 
-VFILE:=		$(wildcard VERSION)
-GITDIR:=	$(wildcard .git)
-ifdef VFILE
-VERSION:=	$(shell $(CAT) VERSION)
-BUILD_INFO+=	V:FILE
-else
-ifndef GITDIR
-VERSION:=	$(shell $(BASENAME) $(PWD)|\
-			$(GREP) $(TARGET)-|\
-			$(SED) 's/.*$(TARGET)-\(.*\)/\1/g')
-NEWSSHA:=	$(shell $(OPENSSL) dgst -sha1 -r NEWS.md |\
-			$(CUT) -c -7)
-BUILD_INFO+=	V:DIR N:$(NEWSSHA)
-else
-VERSION:=	$(shell $(GIT) describe --tags --dirty --always)
-BUILD_INFO+=	V:GIT
-endif
+include Mk/buildinfo.mk
+VERSION:=	$(BUILD_VERSION)
+ifdef GITDIR
 CFLAGS+=	$(DEBUG_CFLAGS)
 endif
-BUILD_DATE:=	$(shell date +%Y-%m-%d)
 
 # Autodetect dependencies known to pkg-config
 PKGS:=		
@@ -243,61 +277,74 @@ PKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists libevent_openssl \
 PKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists libevent_pthreads \
 		&& echo libevent_pthreads)
 endif
+ifneq ($(filter -DWITHOUT_MIRROR,$(FEATURES)),-DWITHOUT_MIRROR)
+ifndef LIBPCAP_BASE
+PKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists libpcap \
+		&& echo libpcap)
+endif
+endif
 TPKGS:=		
 ifndef CHECK_BASE
 TPKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists check \
 		&& echo check)
 endif
 
+# Function: Generate list of base paths to search when locating packages
+# $1 packagename
+bases=		/usr/local/opt/$(1) \
+		/opt/local \
+		/usr/local \
+		/usr
+
+# Function: Locate base path for a package we depend on
+# $1 packagename, $2 pattern suffix, $3 override path(s)
+locate=		$(subst /$(2),,$(word 1,$(wildcard \
+		$(addsuffix /$(2),$(if $(3),$(3),$(call bases,$(1)))))))
+
 # Autodetect dependencies not known to pkg-config
 ifeq (,$(filter openssl,$(PKGS)))
-OPENSSL_PAT:=	include/openssl/ssl.h
-ifdef OPENSSL_BASE
-OPENSSL_FIND:=	$(wildcard $(OPENSSL_BASE)/$(OPENSSL_PAT))
-else
-OPENSSL_FIND:=	$(wildcard \
-		/opt/local/$(OPENSSL_PAT) \
-		/usr/local/$(OPENSSL_PAT) \
-		/usr/$(OPENSSL_PAT))
-endif
-OPENSSL_AVAIL:=	$(OPENSSL_FIND:/$(OPENSSL_PAT)=)
-OPENSSL_FOUND:=	$(word 1,$(OPENSSL_AVAIL))
+OPENSSL_FOUND:=	$(call locate,openssl,include/openssl/ssl.h,$(OPENSSL_BASE))
+OPENSSL:=	$(OPENSSL_FOUND)/bin/openssl
 ifndef OPENSSL_FOUND
 $(error dependency 'OpenSSL' not found; \
 	install it or point OPENSSL_BASE to base path)
 endif
 endif
 ifeq (,$(filter libevent,$(PKGS)))
-LIBEVENT_PAT:=	include/event2/event.h
-ifdef LIBEVENT_BASE
-LIBEVENT_FIND:=	$(wildcard $(LIBEVENT_BASE)/$(LIBEVENT_PAT))
-else
-LIBEVENT_FIND:=	$(wildcard \
-		/opt/local/$(LIBEVENT_PAT) \
-		/usr/local/$(LIBEVENT_PAT) \
-		/usr/$(LIBEVENT_PAT))
-endif
-LIBEVENT_AVAIL:=$(LIBEVENT_FIND:/$(LIBEVENT_PAT)=)
-LIBEVENT_FOUND:=$(word 1,$(LIBEVENT_AVAIL))
+LIBEVENT_FOUND:=$(call locate,libevent,include/event2/event.h,$(LIBEVENT_BASE))
 ifndef LIBEVENT_FOUND
 $(error dependency 'libevent 2.x' not found; \
 	install it or point LIBEVENT_BASE to base path)
 endif
 endif
-ifeq (,$(filter check,$(TPKGS)))
-CHECK_PAT:=	include/check.h
-ifdef CHECK_BASE
-CHECK_FIND:=	$(wildcard $(CHECK_BASE)/$(CHECK_PAT))
-else
-CHECK_FIND:=	$(wildcard \
-		/opt/local/$(CHECK_PAT) \
-		/usr/local/$(CHECK_PAT) \
-		/usr/$(CHECK_PAT))
+ifneq ($(filter -DWITHOUT_MIRROR,$(FEATURES)),-DWITHOUT_MIRROR)
+ifeq (,$(filter libpcap,$(PKGS)))
+LIBPCAP_FOUND:=	$(call locate,libpcap,include/pcap.h,$(LIBPCAP_BASE))
+ifndef LIBPCAP_FOUND
+$(error dependency 'libpcap' not found; \
+	install it or point LIBPCAP_BASE to base path)
 endif
-CHECK_AVAIL:=	$(CHECK_FIND:/$(CHECK_PAT)=)
-CHECK_FOUND:=	$(word 1,$(CHECK_AVAIL))
+endif
+endif
+ifeq (,$(filter check,$(TPKGS)))
+CHECK_FOUND:=	$(call locate,check,include/check.h,$(CHECK_BASE))
 ifndef CHECK_FOUND
 CHECK_MISSING:=	1
+endif
+endif
+
+# Always search filesystem for libnet because libnet-config is unreliable
+ifneq ($(filter -DWITHOUT_MIRROR,$(FEATURES)),-DWITHOUT_MIRROR)
+LIBNET_FOUND:=	$(call locate,libnet,include/libnet-1.1/libnet.h,$(LIBNET_BASE))
+ifdef LIBNET_FOUND
+LIBNET_FOUND_INC:=	$(LIBNET_FOUND)/include/libnet-1.1
+else
+LIBNET_FOUND:=	$(call locate,libnet,include/libnet.h,$(LIBNET_BASE))
+LIBNET_FOUND_INC:=	$(LIBNET_FOUND)/include
+endif
+ifndef LIBNET_FOUND
+$(error dependency 'libnet' not found; \
+	install it or point LIBNET_BASE to base path)
 endif
 endif
 
@@ -316,6 +363,18 @@ PKG_LIBS+=	-levent_openssl
 endif
 ifeq (,$(filter libevent_pthreads,$(PKGS)))
 PKG_LIBS+=	-levent_pthreads
+endif
+ifneq ($(filter -DWITHOUT_MIRROR,$(FEATURES)),-DWITHOUT_MIRROR)
+ifdef LIBNET_FOUND
+PKG_CPPFLAGS+=	-I$(LIBNET_FOUND_INC)
+PKG_LDFLAGS+=	-L$(LIBNET_FOUND)/lib
+PKG_LIBS+=	-lnet
+endif
+ifdef LIBPCAP_FOUND
+PKG_CPPFLAGS+=	-I$(LIBPCAP_FOUND)/include
+PKG_LDFLAGS+=	-L$(LIBPCAP_FOUND)/lib
+PKG_LIBS+=	-lpcap
+endif
 endif
 ifdef CHECK_FOUND
 TPKG_CPPFLAGS+=	-I$(CHECK_FOUND)/include
@@ -339,11 +398,8 @@ TPKG_LIBS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --libs-only-l $(TPKGS))
 endif
 
 CPPDEFS+=	-D_GNU_SOURCE \
-		-D"BNAME=\"$(TARGET)\"" -D"PNAME=\"$(PNAME)\"" \
-		-D"VERSION=\"$(VERSION)\"" -D"BUILD_DATE=\"$(BUILD_DATE)\"" \
-		-D"FEATURES=\"$(FEATURES)\"" -D"BUILD_INFO=\"$(BUILD_INFO)\""
+		-D"PKGLABEL=\"$(PKGLABEL)\""
 CPPCHECKFLAGS+=	$(CPPDEFS)
-FEATURES:=	$(sort $(FEATURES))
 
 ifneq (ccc-analyzer,$(notdir $(CC)))
 PKG_CPPFLAGS:=	$(subst -I,-isystem,$(PKG_CPPFLAGS))
@@ -364,18 +420,22 @@ LDFLAGS+=	-pthread
 endif
 
 # _FORTIFY_SOURCE requires -O on Linux
+ifeq ($(shell uname),Linux)
 ifeq (,$(findstring -O,$(CFLAGS)))
 CFLAGS+=	-O
+endif
 endif
 
 export VERSION
 export OPENSSL
+export OPENSSL_BASE
+export OPENSSL_FOUND
 export MKDIR
 export WGET
 
 ifndef MAKE_RESTARTS
 $(info ------------------------------------------------------------------------------)
-$(info $(PNAME) $(VERSION))
+$(info $(PKGLABEL) $(VERSION))
 $(info ------------------------------------------------------------------------------)
 $(info Report bugs at https://github.com/droe/sslsplit/issues/new)
 $(info Please supply this header for diagnostics when reporting build issues)
@@ -389,10 +449,17 @@ endif
 ifdef LIBEVENT_FOUND
 $(info LIBEVENT_BASE:  $(strip $(LIBEVENT_FOUND)))
 endif
+ifdef LIBPCAP_FOUND
+$(info LIBPCAP_BASE:   $(strip $(LIBPCAP_FOUND)))
+endif
+ifdef LIBNET_FOUND
+$(info LIBNET_BASE:    $(strip $(LIBNET_FOUND)))
+endif
 ifdef CHECK_FOUND
 $(info CHECK_BASE:     $(strip $(CHECK_FOUND)))
 endif
 $(info Build options:  $(FEATURES))
+$(info Build info:     $(BUILD_INFO))
 ifeq ($(shell uname),Darwin)
 $(info OSX_VERSION:    $(OSX_VERSION))
 $(info XNU_VERSION:    $(XNU_VERSION) ($(XNU_METHOD), have $(XNU_HAVE)))
@@ -401,14 +468,18 @@ $(info uname -a:       $(shell uname -a))
 $(info ------------------------------------------------------------------------------)
 endif
 
-all: $(TARGET)
+all: $(TARGET) $(TARGET).conf $(TARGET).1 $(TARGET).conf.5
+
+$(TARGET).test: $(TOBJS)
+	$(CC) $(LDFLAGS) $(TPKG_LDFLAGS) -o $@ $^ $(LIBS) $(TPKG_LIBS)
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-version.o: version.c version.h GNUmakefile $(VFILE) FORCE
+build.o: CPPFLAGS+=$(BUILD_CPPFLAGS)
+build.o: build.c FORCE
 
-%.t.o: %.t.c $(HDRS) GNUmakefile
+%.t.o: %.t.c $(HDRS) $(MKFS)
 ifdef CHECK_MISSING
 	$(error unit test dependency 'check' not found; \
 	install it or point CHECK_BASE to base path)
@@ -416,97 +487,146 @@ endif
 	$(CC) -c $(CPPFLAGS) $(TCPPFLAGS) $(CFLAGS) $(TPKG_CFLAGS) -o $@ \
 		-x c $<
 
-%.o: %.c $(HDRS) GNUmakefile
+%.o: %.c $(HDRS) $(MKFS)
 	$(CC) -c $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
+buildtest: TCPPFLAGS+=-D"TEST_ZEROUSR=\"$(shell id -u -n root||echo 0)\""
+buildtest: TCPPFLAGS+=-D"TEST_ZEROGRP=\"$(shell id -g -n root||echo 0)\""
+buildtest: $(TARGET).test
+	$(MAKE) -C extra/engine
+	$(MAKE) -C extra/pki testreqs
+
+test: buildtest
+	./$(TARGET).test
+
+sudotest: buildtest
+	sudo ./$(TARGET).test
 
 travis: TCPPFLAGS+=-DTRAVIS
 travis: test
 
-test: TCPPFLAGS+=-D"TEST_ZEROUSR=\"$(shell id -u -n root||echo 0)\""
-test: TCPPFLAGS+=-D"TEST_ZEROGRP=\"$(shell id -g -n root||echo 0)\""
-test: $(TARGET).test
-	$(RM) extra/pki/session.pem
-	$(MAKE) -C extra/pki testreqs session
-	./$(TARGET).test
-
-$(TARGET).test: $(TOBJS)
-	$(CC) $(LDFLAGS) $(TPKG_LDFLAGS) -o $@ $^ $(LIBS) $(TPKG_LIBS)
-
 clean:
+	$(MAKE) -C extra/engine clean
 	$(RM) -f $(TARGET) $(TARGET).test *.o .*.o *.core *~
+	$(RM) -f $(TARGET).conf
 	$(RM) -rf *.dSYM
 
-install: $(TARGET)
-	test -d $(DESTDIR)$(PREFIX)/bin || $(MKDIR) -p $(DESTDIR)$(PREFIX)/bin
-	test -d $(DESTDIR)$(PREFIX)/$(MANDIR)/man1 || \
-		$(MKDIR) -p $(DESTDIR)$(PREFIX)/$(MANDIR)/man1
+SUBSTITUTIONS:=	-e 's,/usr/local/etc/sslsplit,$(SYSCONFDIR)/$(TARGET),' \
+		-e 's,@@VERSION@@,$(VERSION),' \
+		-e 's,@@DATE@@,$(BUILD_DATE),'
+
+$(TARGET).1: $(TARGET).1.in $(MKFS) FORCE
+	$(SED) $(SUBSTITUTIONS) <$< >$@
+
+$(TARGET).conf: $(TARGET).conf.in $(MKFS) FORCE
+	$(SED) $(SUBSTITUTIONS) <$< >$@
+
+$(TARGET).conf.5: $(TARGET).conf.5.in $(MKFS) FORCE
+	$(SED) $(SUBSTITUTIONS) <$< >$@
+
+install: $(TARGET) $(TARGET).conf $(TARGET).1 $(TARGET).conf.5
+	test -d $(DESTDIR)$(BINDIR) || $(MKDIR) -p $(DESTDIR)$(BINDIR)
+	test -d $(DESTDIR)$(SYSCONFDIR)/$(TARGET) || \
+		$(MKDIR) -p $(DESTDIR)$(SYSCONFDIR)/$(TARGET)
+	test -d $(DESTDIR)$(MANDIR)/man1 || \
+		$(MKDIR) -p $(DESTDIR)$(MANDIR)/man1
+	test -d $(DESTDIR)$(MANDIR)/man5 || \
+		$(MKDIR) -p $(DESTDIR)$(MANDIR)/man5
 	$(INSTALL) $(BINOWNERFLAGS) -m $(BINMODE) \
-		$(TARGET) $(DESTDIR)$(PREFIX)/bin/
+		$(TARGET) $(DESTDIR)$(BINDIR)/
+	$(INSTALL) $(CNFOWNERFLAGS) -m $(CNFMODE) \
+		$(TARGET).conf \
+		$(DESTDIR)$(SYSCONFDIR)/$(TARGET)/$(TARGET).conf.sample
 	$(INSTALL) $(MANOWNERFLAGS) -m $(MANMODE) \
-		$(TARGET).1 $(DESTDIR)$(PREFIX)/$(MANDIR)/man1/
+		$(TARGET).1 $(DESTDIR)$(MANDIR)/man1/
+	$(INSTALL) $(MANOWNERFLAGS) -m $(MANMODE) \
+		$(TARGET).conf.5 $(DESTDIR)$(MANDIR)/man5/
 
 deinstall:
-	$(RM) -f $(DESTDIR)$(PREFIX)/bin/$(TARGET) $(DESTDIR)$(PREFIX)/$(MANDIR)/man1/$(TARGET).1
+	$(RM) -f $(DESTDIR)$(BINDIR)/$(TARGET) \
+		$(DESTDIR)$(MANDIR)/man1/$(TARGET).1 \
+		$(DESTDIR)$(MANDIR)/man5/$(TARGET).conf.5
+	$(RM) -rf $(DESTDIR)$(SYSCONFDIR)/$(TARGET)/
 
 ifdef GITDIR
 lint:
 	$(CPPCHECK) $(CPPCHECKFLAGS) --force --enable=all --error-exitcode=1 .
 
-manlint: $(TARGET).1
+manlint: $(TARGET).1 $(TARGET).conf.5
 	$(CHECKNR) $(TARGET).1
 
-mantest: $(TARGET).1
-	$(RM) -f man1
+mantest: $(TARGET).1 $(TARGET).conf.5
+	$(RM) -f man1 man5
 	$(LN) -sf . man1
+	$(LN) -sf . man5
 	$(MAN) -M . 1 $(TARGET)
-	$(RM) man1
+	$(MAN) -M . 5 $(TARGET).conf
+	$(RM) man1 man5
 
-$(TARGET)-$(VERSION).1.txt: $(TARGET).1
+copyright: *.c *.h *.1.in *.5.in extra/*/*.c
+	Mk/bin/copyright.py $^
+
+$(PKGNAME)-$(VERSION).1.txt: $(TARGET).1
 	$(RM) -f man1
 	$(LN) -sf . man1
 	$(MAN) -M . 1 $(TARGET) | $(COL) -b >$@
 	$(RM) man1
 
-man: $(TARGET)-$(VERSION).1.txt
+$(PKGNAME)-$(VERSION).conf.5.txt: $(TARGET).conf.5
+	$(RM) -f man5
+	$(LN) -sf . man5
+	$(MAN) -M . 5 $(TARGET).conf | $(COL) -b >$@
+	$(RM) man5
+
+man: $(PKGNAME)-$(VERSION).1.txt $(PKGNAME)-$(VERSION).conf.5.txt
 
 manclean:
-	$(RM) -f $(TARGET)-*.1.txt
+	$(RM) -f $(PKGNAME)-*.1.txt $(PKGNAME)-*.conf.5.txt
 
 fetchdeps:
 	$(WGET) -O- $(KHASH_URL) >khash.h
 	#$(RM) -rf xnu/xnu-*
 	$(MAKE) -C xnu fetch
 
-dist: $(TARGET)-$(VERSION).tar.bz2 $(TARGET)-$(VERSION).tar.bz2.asc
+dist: $(PKGNAME)-$(VERSION).tar.bz2 $(PKGNAME)-$(VERSION).tar.bz2.asc
 
 %.asc: %
 	$(GPG) -u $(GPGSIGNKEY) --armor --output $@ --detach-sig $<
 
-$(TARGET)-$(VERSION).tar.bz2:
-	$(MKDIR) -p $(TARGET)-$(VERSION)
-	echo $(VERSION) >$(TARGET)-$(VERSION)/VERSION
-	$(GIT) archive --prefix=$(TARGET)-$(VERSION)/ HEAD \
-		>$(TARGET)-$(VERSION).tar
-	$(TAR) -f $(TARGET)-$(VERSION).tar -r $(TARGET)-$(VERSION)/VERSION
-	$(BZIP2) <$(TARGET)-$(VERSION).tar >$(TARGET)-$(VERSION).tar.bz2
-	$(RM) $(TARGET)-$(VERSION).tar
-	$(RM) -r $(TARGET)-$(VERSION)
+$(PKGNAME)-$(VERSION).tar.bz2:
+	$(MKDIR) -p $(PKGNAME)-$(VERSION)
+	echo $(VERSION) >$(PKGNAME)-$(VERSION)/VERSION
+	$(OPENSSL) dgst -sha1 -r *.[hc] | $(SORT) -k 2 \
+		>$(PKGNAME)-$(VERSION)/HASHES
+	$(GIT) archive --prefix=$(PKGNAME)-$(VERSION)/ HEAD \
+		>$(PKGNAME)-$(VERSION).tar
+	$(TAR) -f $(PKGNAME)-$(VERSION).tar -r $(PKGNAME)-$(VERSION)/VERSION
+	$(TAR) -f $(PKGNAME)-$(VERSION).tar -r $(PKGNAME)-$(VERSION)/HASHES
+	$(BZIP2) <$(PKGNAME)-$(VERSION).tar >$(PKGNAME)-$(VERSION).tar.bz2
+	$(RM) $(PKGNAME)-$(VERSION).tar
+	$(RM) -r $(PKGNAME)-$(VERSION)
 
-disttest: $(TARGET)-$(VERSION).tar.bz2 $(TARGET)-$(VERSION).tar.bz2.asc
+disttest: $(PKGNAME)-$(VERSION).tar.bz2 $(PKGNAME)-$(VERSION).tar.bz2.asc
 	$(GPG) --verify $<.asc $<
 	$(BZIP2) -d < $< | $(TAR) -x -f -
-	cd $(TARGET)-$(VERSION) && $(MAKE) && $(MAKE) test && ./$(TARGET) -V
-	$(RM) -r $(TARGET)-$(VERSION)
+	cd $(PKGNAME)-$(VERSION) && $(MAKE) && $(MAKE) test && ./$(TARGET) -V
+	$(RM) -r $(PKGNAME)-$(VERSION)
 
 distclean:
-	$(RM) -f $(TARGET)-*.tar.bz2*
+	$(RM) -f $(PKGNAME)-*.tar.bz2*
 
 realclean: distclean manclean clean
 	$(MAKE) -C extra/pki clean
 endif
 
+docker:
+	$(DOCKER) build -f docker/sslsplit/Dockerfile --target builder -t sslsplit-builder:$(VERSION) .
+	$(DOCKER) build -f docker/sslsplit/Dockerfile --target production -t sslsplit:$(VERSION) .
+	$(DOCKER) run sslsplit:$(VERSION)
+
 FORCE:
 
-.PHONY: all config clean test travis lint install deinstall manlint \
-        mantest man manclean fetchdeps dist disttest distclean realclean
+.PHONY: all config clean buildtest test sudotest travis lint \
+        install deinstall copyright manlint mantest man manclean fetchdeps \
+        dist disttest distclean realclean docker
 

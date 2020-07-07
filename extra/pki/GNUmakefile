@@ -5,7 +5,7 @@ MKDIR?=		mkdir
 
 # OpenSSL settings
 CA_SUBJECT?=	'/C=CH/O=SSLsplit Root CA/CN=SSLsplit Root CA/'
-CA_DAYS?=	3650
+CA_DAYS?=	1095
 CA_EXT:=	v3_ca
 CRT_SUBJECT?=	'/C=CH/O=SSLsplit Test Certificate/CN=daniel.roe.ch/'
 CRT_DAYS?=	365
@@ -17,7 +17,7 @@ NO_SSL2:=	$(shell $(OPENSSL) s_server -h 2>&1|awk '/-no_ssl2/ {print $$1}')
 
 all: rsa dsa ec targets server pwd
 
-testreqs: rsa targets server
+testreqs: rsa targets server session
 
 session: session.pem
 
@@ -112,17 +112,17 @@ targets/wildcard.roe.ch.pem: rsa.crt
 		targets/wildcard.roe.ch.crt
 
 # localhost network connectivity is required
-session.pem: server.pem
+session.pem: | server.pem
 	$(OPENSSL) s_server -accept 46143 -cert server.pem -quiet $(NO_SSL2) & \
 		pid=$$! ; \
 		sleep 1 ; \
-		echo q | $(OPENSSL) s_client -connect localhost:46143 \
+		echo q | $(OPENSSL) s_client -connect 127.0.0.1:46143 \
 			-quiet -no_ign_eof -sess_out $@ ; \
 		kill $$pid
 	test -r $@
 
 clean:
-	rm -rf rsa.* dsa.* ec.* dh*.param targets *.srl session.pem server.*
+	rm -rf rsa.* dsa.* ec.* dh*.param targets *.srl server.*
 
 .PHONY: all clean rsa dsa ec dh session targets
 

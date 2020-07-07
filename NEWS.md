@@ -1,11 +1,92 @@
 
 ### SSLsplit develop
 
+-   Minor bugfixes and improvements.
+
+
+### SSLsplit 0.5.5 2019-08-30
+
+-   Add -A option for specifying a default leaf certificate instead of
+    generating it on the fly (issue #139).
+-   Rename the following config file options for clarity and consistency:
+    -   LeafCerts to LeafKey
+    -   TargetCertDir to LeafCertDir
+    -   CRL to LeafCRLURL
+    The old syntax is still accepted for backwards compatibility.
+-   Increase the default RSA leaf key size to 2048 bits and force an OpenSSL
+    security level of 0 in order to maximize interoperability in the default
+    configuration.  OpenSSL with a security level of 2 or higher was rejecting
+    our old default leaf key size of 1024 bits (issue #248).
+-   Propagate the exit status of the privsep child process to the parent
+    process and use 128+signal convention (issue #252).
+-   Fix unexpected connection termination for certificates without a subject
+    common name.
+-   Fix TCP ports in packet mirroring mode (issue #247).
+-   Fix certificate loading with LibreSSL 2.9.2 and later.
+-   Fix MANDIR make variable semantics to GNU standards and introduce
+    BINDIR and SYSCONFDIR in order to allow better control over where files are
+    installed by the install target (pull request #255 by @arkamar and
+    follow-up work).  Also fixes the sample config file to be installed to
+    $(SYSCONFDIR)/sslsplit/ instead of $(PREFIX)/sslsplit/ by default.
+-   No longer create /var/log/sslsplit and /var/run/sslsplit directories as
+    part of `make install` (issue #251).
+-   Add XNU headers for macOS Mojave 10.14.1 to 10.14.3.
+-   Minor bugfixes and improvements.
+
+
+### SSLsplit 0.5.4 2018-10-29
+
+This release includes work sponsored by HackerOne.
+
+-   Add PCAP content log modes (-X, -Y, -y) and a packet mirroring content log
+    mode (-T, -I) to encapsulate decrypted traffic segments in emulated TCP, IP
+    and Ethernet headers and write the result to PCAP files or send it to a
+    packet capture host on the local network segment (issue #215, based on pull
+    req #149 by @cihankom).
+-   Suppress Expect-CT header in order to avoid Certificate Transparency log
+    lookup failures (issue #205).
+-   Add -x option for activating an OpenSSL engine (issue #204, pull req #206).
+-   Add -f option for loading configuration from file, including a new manual
+    page, sslsplit.conf(5) (pull req #193).
+-   Bypass privilege separation overhead for when privileges are not actually
+    dropped; this allows the use of `-u root` to actively prevent privilege
+    separation and remove the associated IPC overhead (issue #222).
+-   Add `sudotest` target for optional unit tests which require privileges to
+    run successfully.
+-   Fix crash when using LibreSSL (pull req #207).
+-   Add XNU headers for macOS High Sierra 10.13.1 to 10.13.6.
+-   Release sig PGP/GPG key rollover from 0xB5D3397E to 0xE1520675375F5E35.
+-   Minor bugfixes and improvements.
+
+
+### SSLsplit 0.5.3 2018-07-20
+
+-   Add -a and -b for initial basic client certificate support (pull req #194
+    by @naf419, issue #46).
+-   Respect `SOURCE_DATE_EPOCH` for reproducible builds (pull req #192 by
+    @anthraxx).
+-   Sign using SHA-256 instead of SHA-1 when key type of server and key type
+    of used CA certificate differ (issue #189).
+-   Fix keyUsage to match the type of leaf key used instead of copying from
+    upstream certificate (issue #195).
+-   Fix build with OpenSSL 1.1.1 (pull req #186 by @sonertari, issue #183).
+-   Fix build on FreeBSD 12 (patch-proc.c r436571 from FreeBSD ports).
+-   Minor bugfixes and improvements.
+
+
+### SSLsplit 0.5.2 2018-02-10
+
+-   Add support for SSLv2 ClientHello handshake format for SSLv3/TLS
+    connections and while there, essentially fixing autossl for clients using
+    SSLv2 ClientHello handshake format with SSLv3/TLS (#185).
+-   Suppress Upgrade header in order to prevent upgrading connections to
+    WebSockets or HTTP/2 (#91).
+-   Add -M for writing an SSLKEYLOGFILE compatible log file (issue #184).
+-   Fix error handling for Darwin libproc functions (-i).
 -   Fix session cache misses and failed unit tests on MIPS by fixing undefined
     behaviour in session cache hash functions (Debian #848919 and #851271).
 -   Synthesize MAC addresses to avoid the requirement for root privileges and
     waiting for ARP timeouts on some platforms in log2pcap.py (issue #169).
--   Add -M for writing an SSLKEYLOGFILE compatible log file (issue #184).
 -   Minor bugfixes and improvements.
 
 
@@ -29,9 +110,9 @@
 -   Fix data processing when EOF is received before all incoming data has been
     processed.
 -   Fix multiple signal handling issues in the privilege separation parent
-    which led to the parent process being killed ungracefully (SIGTERM) or
-    being stuck in wait() while still having signals (SIGQUIT etc) queued up
-    for forwarding to the child process (issue #137).
+    which led to the parent process being killed ungracefully or being stuck
+    in wait() while still having signals queued up for forwarding to the child
+    process (issue #137).
 -   No longer assume an out of memory condition when a certificate contains
     neither a CN nor a subjectAltName extension.
 -   Fix parallel make build (-j) for the test target (issue #140).

@@ -1,28 +1,29 @@
-/*
+/*-
  * SSLsplit - transparent SSL/TLS interception
- * Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
- * All rights reserved.
  * https://www.roe.ch/SSLsplit
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+ * All rights reserved.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 /* silence daemon(3) deprecation warning on Mac OS X */
@@ -39,7 +40,7 @@
 #include "cachemgr.h"
 #include "sys.h"
 #include "log.h"
-#include "version.h"
+#include "build.h"
 #include "defaults.h"
 
 #include <stdlib.h>
@@ -52,10 +53,13 @@
 #include <getopt.h>
 #endif /* !__BSD__ */
 
-#include <event2/event.h>
-
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <event2/event.h>
+#ifndef WITHOUT_MIRROR
+#include <libnet.h>
+#include <pcap.h>
+#endif /* !WITHOUT_MIRROR */
 
 #if __APPLE__
 #undef daemon
@@ -69,8 +73,9 @@ extern int daemon(int, int);
 static void
 main_version(void)
 {
-	fprintf(stderr, "%s %s (built %s)\n", PNAME, version, build_date);
-	if (strlen(version) < 5) {
+	fprintf(stderr, "%s %s (built %s)\n",
+	                PKGLABEL, build_version, build_date);
+	if (strlen(build_version) < 5) {
 		/*
 		 * Note to package maintainers:  If you break the version
 		 * string in your build, it will be impossible to provide
@@ -93,14 +98,14 @@ main_version(void)
 		fprintf(stderr, "---------------------------------------"
 		                "---------------------------------------\n");
 	}
-	fprintf(stderr, "Copyright (c) 2009-2018, "
+	fprintf(stderr, "Copyright (c) 2009-2019, "
 	                "Daniel Roethlisberger <daniel@roe.ch>\n");
 	fprintf(stderr, "https://www.roe.ch/SSLsplit\n");
 	if (build_info[0]) {
 		fprintf(stderr, "Build info: %s\n", build_info);
 	}
-	if (features[0]) {
-		fprintf(stderr, "Features: %s\n", features);
+	if (build_features[0]) {
+		fprintf(stderr, "Features: %s\n", build_features);
 	}
 	nat_version();
 	fprintf(stderr, "Local process info support: ");
@@ -112,6 +117,22 @@ main_version(void)
 	ssl_openssl_version();
 	fprintf(stderr, "compiled against libevent %s\n", LIBEVENT_VERSION);
 	fprintf(stderr, "rtlinked against libevent %s\n", event_get_version());
+#ifndef WITHOUT_MIRROR
+	fprintf(stderr, "compiled against libnet %s\n", LIBNET_VERSION);
+#ifndef __OpenBSD__
+	const char *lnv = libnet_version();
+	if (!strncmp(lnv, "libnet version ", 15))
+		lnv += 15;
+	fprintf(stderr, "rtlinked against libnet %s\n", lnv);
+#else /* __OpenBSD__ */
+	fprintf(stderr, "rtlinked against libnet n/a\n");
+#endif /* __OpenBSD__ */
+	fprintf(stderr, "compiled against libpcap n/a\n");
+	const char *lpv = pcap_lib_version();
+	if (!strncmp(lpv, "libpcap version ", 16))
+		lpv += 16;
+	fprintf(stderr, "rtlinked against libpcap %s\n", lpv);
+#endif /* !WITHOUT_MIRROR */
 	fprintf(stderr, "%d CPU cores detected\n", sys_get_cpu_cores());
 }
 
@@ -122,20 +143,26 @@ static void
 main_usage(void)
 {
 	const char *dflt, *warn;
-	const char *usagefmt =
-"Usage: %s [options...] [proxyspecs...]\n"
+	const char *usagefmt1 =
+"Usage: %s [-D] [-f conffile] [-o opt=val] [options...] [proxyspecs...]\n"
+"  -f conffile use conffile to load configuration from\n"
+"  -o opt=val  override conffile option opt with value val\n"
 "  -c pemfile  use CA cert (and key) from pemfile to sign forged certs\n"
 "  -k pemfile  use CA key (and cert) from pemfile to sign forged certs\n"
 "  -C pemfile  use CA chain from pemfile (intermediate and root CA certs)\n"
 "  -K pemfile  use key from pemfile for leaf certs (default: generate)\n"
 "  -q crlurl   use URL as CRL distribution point for all forged certs\n"
 "  -t certdir  use cert+chain+key PEM files from certdir to target all sites\n"
-"              matching the common names (non-matching: generate if CA)\n"
+"              matching the common names (non-matching: -T or generate if CA)\n"
+"  -A pemfile  use cert+chain+key PEM file as fallback leaf cert when none of\n"
+"              those given by -t match, instead of generating one on the fly\n"
 "  -w gendir   write leaf key and only generated certificates to gendir\n"
 "  -W gendir   write leaf key and all certificates to gendir\n"
 "  -O          deny all OCSP requests on all proxyspecs\n"
 "  -P          passthrough SSL connections if they cannot be split because of\n"
 "              client cert auth or no matching cert and no CA (default: drop)\n"
+"  -a pemfile  use cert from pemfile when destination requests client certs\n"
+"  -b pemfile  use key from pemfile when destination requests client certs\n"
 #ifndef OPENSSL_NO_DH
 "  -g pemfile  use DH group params from pemfile (default: keyfiles or auto)\n"
 #define OPT_g "g:"
@@ -157,6 +184,12 @@ main_usage(void)
 "  -r proto    only support one of " SSL_PROTO_SUPPORT_S "(default: all)\n"
 "  -R proto    disable one of " SSL_PROTO_SUPPORT_S "(default: none)\n"
 "  -s ciphers  use the given OpenSSL cipher suite spec (default: " DFLT_CIPHERS ")\n"
+#ifndef OPENSSL_NO_ENGINE
+"  -x engine   load OpenSSL engine with the given identifier\n"
+#define OPT_x "x:"
+#else /* OPENSSL_NO_ENGINE */
+#define OPT_x 
+#endif /* OPENSSL_NO_ENGINE */
 "  -e engine   specify default NAT engine to use (default: %s)\n"
 "  -E          list available NAT engines and exit\n"
 "  -u user     drop privileges to user (default if run as root: " DFLT_DROPUSER ")\n"
@@ -183,17 +216,34 @@ main_usage(void)
 "              %%%% - literal '%%'\n"
 #ifdef HAVE_LOCAL_PROCINFO
 "      e.g.    \"/var/log/sslsplit/%%X/%%u-%%s-%%d-%%T.log\"\n"
+#else /* !HAVE_LOCAL_PROCINFO */
+"      e.g.    \"/var/log/sslsplit/%%T-%%s-%%d.log\"\n"
+#endif /* HAVE_LOCAL_PROCINFO */
+"  -X pcapfile pcap log: packets to pcapfile (excludes -Y/-y)\n"
+"  -Y pcapdir  pcap log: packets to separate files in dir (excludes -X/-y)\n"
+"  -y pathspec pcap log: packets to sep files with %% subst (excl. -X/-Y):\n"
+"              see option -F for pathspec format\n"
+#ifndef WITHOUT_MIRROR
+"  -I if       mirror packets to interface\n"
+"  -T addr     mirror packets to target address (used with -I)\n"
+#define OPT_I "I:"
+#define OPT_T "T:"
+#else /* WITHOUT_MIRROR */
+#define OPT_I 
+#define OPT_T 
+#endif /* WITHOUT_MIRROR */
+"  -M logfile  log master keys to logfile in SSLKEYLOGFILE format\n"
+#ifdef HAVE_LOCAL_PROCINFO
 "  -i          look up local process owning each connection for logging\n"
 #define OPT_i "i"
 #else /* !HAVE_LOCAL_PROCINFO */
-"      e.g.    \"/var/log/sslsplit/%%T-%%s-%%d.log\"\n"
 #define OPT_i 
 #endif /* HAVE_LOCAL_PROCINFO */
-"  -M logfile  log master keys to logfile in SSLKEYLOGFILE format\n"
 "  -d          daemon mode: run in background, log error messages to syslog\n"
 "  -D          debug mode: run in foreground, log debug messages on stderr\n"
 "  -V          print version information and exit\n"
-"  -h          print usage information and exit\n"
+"  -h          print usage information and exit\n";
+	const char *usagefmt2 =
 "  proxyspec = type listenaddr+port [natengine|targetaddr+port|\"sni\"+port]\n"
 "      e.g.    http 0.0.0.0 8080 www.roe.ch 80  # http/4; static hostname dst\n"
 "              https ::1 8443 2001:db8::1 443   # https/6; static address dst\n"
@@ -213,38 +263,24 @@ main_usage(void)
 		warn = "";
 	}
 
-	fprintf(stderr, usagefmt, BNAME, dflt, BNAME, warn);
+	fprintf(stderr, usagefmt1, build_pkgname, dflt);
+	fprintf(stderr, usagefmt2, build_pkgname, warn);
 }
 
 /*
- * Callback to load a cert/chain/key combo from a single PEM file.
+ * Callback to load a cert/chain/key combo from a single PEM file for -t.
  * A return value of -1 indicates a fatal error to the file walker.
  */
 static int
-main_loadtgcrt(const char *filename, void *arg)
+main_load_leafcert(const char *filename, void *arg)
 {
 	opts_t *opts = arg;
 	cert_t *cert;
 	char **names;
 
-	cert = cert_new_load(filename);
-	if (!cert) {
-		log_err_printf("Failed to load cert and key from PEM file "
-		                "'%s'\n", filename);
+	cert = opts_load_cert_chain_key(filename);
+	if (!cert)
 		return -1;
-	}
-	if (X509_check_private_key(cert->crt, cert->key) != 1) {
-		log_err_printf("Cert does not match key in PEM file "
-		                "'%s':\n", filename);
-		ERR_print_errors_fp(stderr);
-		return -1;
-	}
-
-#ifdef DEBUG_CERTIFICATE
-	log_dbg_printf("Loaded '%s':\n", filename);
-	log_dbg_print_free(ssl_x509_to_str(cert->crt));
-	log_dbg_print_free(ssl_x509_to_pem(cert->crt));
-#endif /* DEBUG_CERTIFICATE */
 
 	if (OPTS_DEBUG(opts)) {
 		log_dbg_printf("Targets for '%s':", filename);
@@ -271,18 +307,6 @@ main_loadtgcrt(const char *filename, void *arg)
 }
 
 /*
- * Handle out of memory conditions in early stages of main().
- * Print error message and exit with failure status code.
- * Does not return.
- */
-void NORET
-oom_die(const char *argv0)
-{
-	fprintf(stderr, "%s: out of memory\n", argv0);
-	exit(EXIT_FAILURE);
-}
-
-/*
  * Main entry point.
  */
 int
@@ -305,186 +329,94 @@ main(int argc, char *argv[])
 		natengine = NULL;
 	}
 
-	while ((ch = getopt(argc, argv, OPT_g OPT_G OPT_Z OPT_i "k:c:C:K:t:"
-	                    "OPs:r:R:e:Eu:m:j:p:l:L:S:F:M:dDVhW:w:q:")) != -1) {
+	while ((ch = getopt(argc, argv,
+	                    OPT_g OPT_G OPT_Z OPT_i OPT_x OPT_T OPT_I
+	                    "k:c:C:K:t:A:OPa:b:s:r:R:e:Eu:m:j:p:l:L:S:F:M:"
+	                    "dDVhW:w:q:f:o:X:Y:y:")) != -1) {
 		switch (ch) {
-			case 'c':
-				if (opts->cacrt)
-					X509_free(opts->cacrt);
-				opts->cacrt = ssl_x509_load(optarg);
-				if (!opts->cacrt) {
-					fprintf(stderr, "%s: error loading CA "
-					                "cert from '%s':\n",
-					                argv0, optarg);
-					if (errno) {
-						fprintf(stderr, "%s\n",
-						        strerror(errno));
-					} else {
-						ERR_print_errors_fp(stderr);
-					}
+			case 'f':
+				if (opts->conffile)
+					free(opts->conffile);
+				opts->conffile = strdup(optarg);
+				if (!opts->conffile)
+					oom_die(argv0);
+				if (load_conffile(opts, argv0, &natengine) == -1) {
 					exit(EXIT_FAILURE);
 				}
-				ssl_x509_refcount_inc(opts->cacrt);
-				sk_X509_insert(opts->chain, opts->cacrt, 0);
-				if (!opts->cakey) {
-					opts->cakey = ssl_key_load(optarg);
+#ifdef DEBUG_OPTS
+				log_dbg_printf("Conf file: %s\n", opts->conffile);
+#endif /* DEBUG_OPTS */
+				break;
+			case 'o':
+				if (opts_set_option(opts, argv0, optarg, &natengine) == -1) {
+					exit(EXIT_FAILURE);
 				}
-#ifndef OPENSSL_NO_DH
-				if (!opts->dh) {
-					opts->dh = ssl_dh_load(optarg);
-				}
-#endif /* !OPENSSL_NO_DH */
+				break;
+			case 'c':
+				opts_set_cacrt(opts, argv0, optarg);
 				break;
 			case 'k':
-				if (opts->cakey)
-					EVP_PKEY_free(opts->cakey);
-				opts->cakey = ssl_key_load(optarg);
-				if (!opts->cakey) {
-					fprintf(stderr, "%s: error loading CA "
-					                "key from '%s':\n",
-					                argv0, optarg);
-					if (errno) {
-						fprintf(stderr, "%s\n",
-						        strerror(errno));
-					} else {
-						ERR_print_errors_fp(stderr);
-					}
-					exit(EXIT_FAILURE);
-				}
-				if (!opts->cacrt) {
-					opts->cacrt = ssl_x509_load(optarg);
-					if (opts->cacrt) {
-						ssl_x509_refcount_inc(
-						               opts->cacrt);
-						sk_X509_insert(opts->chain,
-						               opts->cacrt, 0);
-					}
-				}
-#ifndef OPENSSL_NO_DH
-				if (!opts->dh) {
-					opts->dh = ssl_dh_load(optarg);
-				}
-#endif /* !OPENSSL_NO_DH */
+				opts_set_cakey(opts, argv0, optarg);
 				break;
 			case 'C':
-				if (ssl_x509chain_load(NULL, &opts->chain,
-				                       optarg) == -1) {
-					fprintf(stderr, "%s: error loading "
-					                "chain from '%s':\n",
-					                argv0, optarg);
-					if (errno) {
-						fprintf(stderr, "%s\n",
-						        strerror(errno));
-					} else {
-						ERR_print_errors_fp(stderr);
-					}
-					exit(EXIT_FAILURE);
-				}
+				opts_set_cachain(opts, argv0, optarg);
 				break;
 			case 'K':
-				if (opts->key)
-					EVP_PKEY_free(opts->key);
-				opts->key = ssl_key_load(optarg);
-				if (!opts->key) {
-					fprintf(stderr, "%s: error loading lea"
-					                "f key from '%s':\n",
-					                argv0, optarg);
-					if (errno) {
-						fprintf(stderr, "%s\n",
-						        strerror(errno));
-					} else {
-						ERR_print_errors_fp(stderr);
-					}
-					exit(EXIT_FAILURE);
-				}
-#ifndef OPENSSL_NO_DH
-				if (!opts->dh) {
-					opts->dh = ssl_dh_load(optarg);
-				}
-#endif /* !OPENSSL_NO_DH */
+				opts_set_leafkey(opts, argv0, optarg);
 				break;
 			case 't':
-				if (!sys_isdir(optarg)) {
-					fprintf(stderr, "%s: '%s' is not a "
-					                "directory\n",
-					                argv0, optarg);
-					exit(EXIT_FAILURE);
-				}
-				if (opts->tgcrtdir)
-					free(opts->tgcrtdir);
-				opts->tgcrtdir = strdup(optarg);
-				if (!opts->tgcrtdir)
-					oom_die(argv0);
+				opts_set_leafcertdir(opts, argv0, optarg);
+				break;
+			case 'A':
+				opts_set_defaultleafcert(opts, argv0, optarg);
 				break;
 			case 'q':
-				if (opts->crlurl)
-					free(opts->crlurl);
-				opts->crlurl = strdup(optarg);
+				opts_set_leafcrlurl(opts, optarg);
 				break;
 			case 'O':
-				opts->deny_ocsp = 1;
+				opts_set_deny_ocsp(opts);
 				break;
 			case 'P':
-				opts->passthrough = 1;
+				opts_set_passthrough(opts);
+				break;
+			case 'a':
+				opts_set_clientcrt(opts, argv0, optarg);
+				break;
+			case 'b':
+				opts_set_clientkey(opts, argv0, optarg);
 				break;
 #ifndef OPENSSL_NO_DH
 			case 'g':
-				if (opts->dh)
-					DH_free(opts->dh);
-				opts->dh = ssl_dh_load(optarg);
-				if (!opts->dh) {
-					fprintf(stderr, "%s: error loading DH "
-					                "params from '%s':\n",
-					                argv0, optarg);
-					if (errno) {
-						fprintf(stderr, "%s\n",
-						        strerror(errno));
-					} else {
-						ERR_print_errors_fp(stderr);
-					}
-					exit(EXIT_FAILURE);
-				}
+				opts_set_dh(opts, argv0, optarg);
 				break;
 #endif /* !OPENSSL_NO_DH */
 #ifndef OPENSSL_NO_ECDH
 			case 'G':
-			{
-				EC_KEY *ec;
-				if (opts->ecdhcurve)
-					free(opts->ecdhcurve);
-				if (!(ec = ssl_ec_by_name(optarg))) {
-					fprintf(stderr, "%s: unknown curve "
-					                "'%s'\n",
-					                argv0, optarg);
-					exit(EXIT_FAILURE);
-				}
-				EC_KEY_free(ec);
-				opts->ecdhcurve = strdup(optarg);
-				if (!opts->ecdhcurve)
-					oom_die(argv0);
+				opts_set_ecdhcurve(opts, argv0, optarg);
 				break;
-			}
 #endif /* !OPENSSL_NO_ECDH */
 #ifdef SSL_OP_NO_COMPRESSION
 			case 'Z':
-				opts->sslcomp = 0;
+				opts_unset_sslcomp(opts);
 				break;
 #endif /* SSL_OP_NO_COMPRESSION */
 			case 's':
-				if (opts->ciphers)
-					free(opts->ciphers);
-				opts->ciphers = strdup(optarg);
-				if (!opts->ciphers)
-					oom_die(argv0);
+				opts_set_ciphers(opts, argv0, optarg);
 				break;
 			case 'r':
-				opts_proto_force(opts, optarg, argv0);
+				opts_force_proto(opts, argv0, optarg);
 				break;
 			case 'R':
-				opts_proto_disable(opts, optarg, argv0);
+				opts_disable_proto(opts, argv0, optarg);
 				break;
+#ifndef OPENSSL_NO_ENGINE
+			case 'x':
+				opts_set_openssl_engine(opts, argv0, optarg);
+				break;
+#endif /* !OPENSSL_NO_ENGINE */
 			case 'e':
-				free(natengine);
+				if (natengine)
+					free(natengine);
 				natengine = strdup(optarg);
 				if (!natengine)
 					oom_die(argv0);
@@ -494,199 +426,65 @@ main(int argc, char *argv[])
 				exit(EXIT_SUCCESS);
 				break;
 			case 'u':
-				if (!sys_isuser(optarg)) {
-					fprintf(stderr, "%s: '%s' is not an "
-					                "existing user\n",
-					                argv0, optarg);
-					exit(EXIT_FAILURE);
-				}
-				if (opts->dropuser)
-					free(opts->dropuser);
-				opts->dropuser = strdup(optarg);
-				if (!opts->dropuser)
-					oom_die(argv0);
+				opts_set_user(opts, argv0, optarg);
 				break;
 			case 'm':
-				if (!sys_isgroup(optarg)) {
-					fprintf(stderr, "%s: '%s' is not an "
-					                "existing group\n",
-					                argv0, optarg);
-					exit(EXIT_FAILURE);
-				}
-				if (opts->dropgroup)
-					free(opts->dropgroup);
-				opts->dropgroup = strdup(optarg);
-				if (!opts->dropgroup)
-					oom_die(argv0);
+				opts_set_group(opts, argv0, optarg);
 				break;
 			case 'p':
-				if (opts->pidfile)
-					free(opts->pidfile);
-				opts->pidfile = strdup(optarg);
-				if (!opts->pidfile)
-					oom_die(argv0);
+				opts_set_pidfile(opts, argv0, optarg);
 				break;
 			case 'j':
-				if (!sys_isdir(optarg)) {
-					fprintf(stderr, "%s: '%s' is not a "
-					                "directory\n",
-					                argv0, optarg);
-					exit(EXIT_FAILURE);
-				}
-				if (opts->jaildir)
-					free(opts->jaildir);
-				opts->jaildir = realpath(optarg, NULL);
-				if (!opts->jaildir) {
-					fprintf(stderr, "%s: Failed to "
-					                "canonicalize '%s': "
-					                "%s (%i)\n",
-					                argv0, optarg,
-					                strerror(errno), errno);
-					exit(EXIT_FAILURE);
-				}
+				opts_set_jaildir(opts, argv0, optarg);
 				break;
 			case 'l':
-				if (opts->connectlog)
-					free(opts->connectlog);
-				opts->connectlog = strdup(optarg);
-				if (!opts->connectlog)
-					oom_die(argv0);
+				opts_set_connectlog(opts, argv0, optarg);
 				break;
 			case 'L':
-				if (opts->contentlog)
-					free(opts->contentlog);
-				opts->contentlog = strdup(optarg);
-				if (!opts->contentlog)
-					oom_die(argv0);
-				opts->contentlog_isdir = 0;
-				opts->contentlog_isspec = 0;
+				opts_set_contentlog(opts, argv0, optarg);
 				break;
 			case 'S':
-				if (!sys_isdir(optarg)) {
-					fprintf(stderr, "%s: '%s' is not a "
-					                "directory\n",
-					                argv0, optarg);
-					exit(EXIT_FAILURE);
-				}
-				if (opts->contentlog)
-					free(opts->contentlog);
-				opts->contentlog = realpath(optarg, NULL);
-				if (!opts->contentlog) {
-					fprintf(stderr, "%s: Failed to "
-					                "canonicalize '%s': "
-					                "%s (%i)\n",
-					                argv0, optarg,
-					                strerror(errno), errno);
-					exit(EXIT_FAILURE);
-				}
-				opts->contentlog_isdir = 1;
-				opts->contentlog_isspec = 0;
+				opts_set_contentlogdir(opts, argv0, optarg);
 				break;
-			case 'F': {
-				char *lhs, *rhs, *p, *q;
-				size_t n;
-				if (opts->contentlog_basedir)
-					free(opts->contentlog_basedir);
-				if (opts->contentlog)
-					free(opts->contentlog);
-				if (log_content_split_pathspec(optarg, &lhs,
-				                               &rhs) == -1) {
-					fprintf(stderr, "%s: Failed to split "
-					                "'%s' in lhs/rhs: "
-					                "%s (%i)\n",
-					                argv0, optarg,
-					                strerror(errno), errno);
-					exit(EXIT_FAILURE);
-				}
-				/* eliminate %% from lhs */
-				for (p = q = lhs; *p; p++, q++) {
-					if (q < p)
-						*q = *p;
-					if (*p == '%' && *(p+1) == '%')
-						p++;
-				}
-				*q = '\0';
-				/* all %% in lhs resolved to % */
-				if (sys_mkpath(lhs, 0777) == -1) {
-					fprintf(stderr, "%s: Failed to create "
-					                "'%s': %s (%i)\n",
-					                argv0, lhs,
-					                strerror(errno), errno);
-					exit(EXIT_FAILURE);
-				}
-				opts->contentlog_basedir = realpath(lhs, NULL);
-				if (!opts->contentlog_basedir) {
-					fprintf(stderr, "%s: Failed to "
-					                "canonicalize '%s': "
-					                "%s (%i)\n",
-					                argv0, lhs,
-					                strerror(errno), errno);
-					exit(EXIT_FAILURE);
-				}
-				/* count '%' in opts->contentlog_basedir */
-				for (n = 0, p = opts->contentlog_basedir;
-				     *p;
-				     p++) {
-					if (*p == '%')
-						n++;
-				}
-				free(lhs);
-				n += strlen(opts->contentlog_basedir);
-				if (!(lhs = malloc(n + 1)))
-					oom_die(argv0);
-				/* re-encoding % to %%, copying basedir to lhs */
-				for (p = opts->contentlog_basedir, q = lhs;
-				     *p;
-				     p++, q++) {
-					*q = *p;
-					if (*q == '%')
-						*(++q) = '%';
-				}
-				*q = '\0';
-				/* lhs contains encoded realpathed basedir */
-				if (asprintf(&opts->contentlog,
-				             "%s/%s", lhs, rhs) < 0)
-					oom_die(argv0);
-				opts->contentlog_isdir = 0;
-				opts->contentlog_isspec = 1;
-				free(lhs);
-				free(rhs);
+			case 'F':
+				opts_set_contentlogpathspec(opts, argv0, optarg);
 				break;
+			case 'X':
+				opts_set_pcaplog(opts, argv0, optarg);
+				break;
+			case 'Y':
+				opts_set_pcaplogdir(opts, argv0, optarg);
+				break;
+			case 'y':
+				opts_set_pcaplogpathspec(opts, argv0, optarg);
+				break;
+#ifndef WITHOUT_MIRROR
+			case 'I':
+				opts_set_mirrorif(opts, argv0, optarg);
+				break;
+			case 'T':
+				opts_set_mirrortarget(opts, argv0, optarg);
+				break;
+#endif /* !WITHOUT_MIRROR */
 			case 'W':
-				opts->certgen_writeall = 1;
-				if (opts->certgendir)
-					free(opts->certgendir);
-				opts->certgendir = strdup(optarg);
-				if (!opts->certgendir)
-					oom_die(argv0);
+				opts_set_certgendir_writeall(opts, argv0, optarg);
 				break;
 			case 'w':
-				opts->certgen_writeall = 0;
-				if (opts->certgendir)
-					free(opts->certgendir);
-				opts->certgendir = strdup(optarg);
-				if (!opts->certgendir)
-					oom_die(argv0);
+				opts_set_certgendir_writegencerts(opts, argv0, optarg);
 				break;
-			}
 #ifdef HAVE_LOCAL_PROCINFO
 			case 'i':
-				opts->lprocinfo = 1;
+				opts_set_lprocinfo(opts);
 				break;
 #endif /* HAVE_LOCAL_PROCINFO */
 			case 'M':
-				if (opts->masterkeylog)
-					free(opts->masterkeylog);
-				opts->masterkeylog = strdup(optarg);
-				if (!opts->masterkeylog)
-					oom_die(argv0);
+				opts_set_masterkeylog(opts, argv0, optarg);
 				break;
 			case 'd':
-				opts->detach = 1;
+				opts_set_daemon(opts);
 				break;
 			case 'D':
-				log_dbg_mode(LOG_DBG_MODE_ERRLOG);
-				opts->debug = 1;
+				opts_set_debug(opts);
 				break;
 			case 'V':
 				main_version();
@@ -703,7 +501,7 @@ main(int argc, char *argv[])
 	}
 	argc -= optind;
 	argv += optind;
-	opts->spec = proxyspec_parse(&argc, &argv, natengine);
+	proxyspec_parse(&argc, &argv, natengine, &opts->spec);
 
 	/* usage checks before defaults */
 	if (opts->detach && OPTS_DEBUG(opts)) {
@@ -711,6 +509,16 @@ main(int argc, char *argv[])
 		                argv0);
 		exit(EXIT_FAILURE);
 	}
+#ifndef WITHOUT_MIRROR
+	if (opts->mirrortarget && !opts->mirrorif) {
+		fprintf(stderr, "%s: -T depends on -I.\n", argv0);
+		exit(EXIT_FAILURE);
+	}
+	if (opts->mirrorif && !opts->mirrortarget) {
+		fprintf(stderr, "%s: -I depends on -T.\n", argv0);
+		exit(EXIT_FAILURE);
+	}
+#endif /* !WITHOUT_MIRROR */
 	if (!opts->spec) {
 		fprintf(stderr, "%s: no proxyspec specified.\n", argv0);
 		exit(EXIT_FAILURE);
@@ -740,7 +548,15 @@ main(int argc, char *argv[])
 			                argv0);
 			exit(EXIT_FAILURE);
 		}
-		if ((opts->cacrt || !opts->tgcrtdir) && !opts->cakey) {
+#ifndef OPENSSL_NO_ENGINE
+		if (opts->openssl_engine &&
+		    ssl_engine(opts->openssl_engine) == -1) {
+			fprintf(stderr, "%s: failed to enable OpenSSL engine"
+			                " %s.\n", argv0, opts->openssl_engine);
+			exit(EXIT_FAILURE);
+		}
+#endif /* !OPENSSL_NO_ENGINE */
+		if (opts->cacrt && !opts->cakey) {
 			fprintf(stderr, "%s: no CA key specified (-k).\n",
 			                argv0);
 			exit(EXIT_FAILURE);
@@ -755,6 +571,13 @@ main(int argc, char *argv[])
 			fprintf(stderr, "%s: CA cert does not match key.\n",
 			                argv0);
 			ERR_print_errors_fp(stderr);
+			exit(EXIT_FAILURE);
+		}
+		if (!opts->cakey &&
+		    !opts->leafcertdir &&
+		    !opts->defaultleafcert) {
+			fprintf(stderr, "%s: at least one of -c/-k, -t or -A "
+			                "must be specified\n", argv0);
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -799,33 +622,86 @@ main(int argc, char *argv[])
 		}
 #endif /* __APPLE__ */
 	}
-	if (opts_has_ssl_spec(opts) && opts->cakey && !opts->key) {
-		/*
-		 * While browsers still generally accept it, use a leaf key
-		 * size of 1024 bit for leaf keys.  When browsers start to
-		 * sunset 1024 bit RSA in leaf keys, we will need to make this
-		 * value bigger, and/or configurable.  Until then, users who
-		 * want a different size can always use their own pre-generated
-		 * leaf key instead of generating one.
-		 */
-		opts->key = ssl_key_genrsa(1024);
-		if (!opts->key) {
+	if (opts->dropuser && sys_isgeteuid(opts->dropuser)) {
+		if (opts->dropgroup) {
+			fprintf(stderr, "%s: cannot use -m when -u is "
+			        "current user\n", argv0);
+			exit(EXIT_FAILURE);
+		}
+		free(opts->dropuser);
+		opts->dropuser = NULL;
+	}
+
+	/* usage checks after defaults */
+	if (opts->dropgroup && !opts->dropuser) {
+		fprintf(stderr, "%s: -m depends on -u\n", argv0);
+		exit(EXIT_FAILURE);
+	}
+
+	/* Warn about options that require per-connection privileged operations
+	 * to be executed through privsep, but only if dropuser is set and is
+	 * not root, because privsep will fastpath in that situation, skipping
+	 * the latency-incurring overhead. */
+	int privsep_warn = 0;
+	if (opts->dropuser) {
+		if (opts->contentlog_isdir) {
+			log_dbg_printf("| Warning: -F requires a privileged "
+			               "operation for each connection!\n");
+			privsep_warn = 1;
+		}
+		if (opts->contentlog_isspec) {
+			log_dbg_printf("| Warning: -S requires a privileged "
+			               "operation for each connection!\n");
+			privsep_warn = 1;
+		}
+		if (opts->pcaplog_isdir) {
+			log_dbg_printf("| Warning: -Y requires a privileged "
+			               "operation for each connection!\n");
+			privsep_warn = 1;
+		}
+		if (opts->pcaplog_isspec) {
+			log_dbg_printf("| Warning: -y requires a privileged "
+			               "operation for each connection!\n");
+			privsep_warn = 1;
+		}
+		if (opts->certgendir) {
+			log_dbg_printf("| Warning: -w/-W require a privileged "
+			               "op for each connection!\n");
+			privsep_warn = 1;
+		}
+	}
+	if (privsep_warn) {
+		log_dbg_printf("| Privileged operations require communication "
+		               "between parent and child process\n"
+		               "| and will negatively impact latency and "
+		               "performance on each connection.\n");
+	}
+
+	/* debug log, part 1 */
+	if (OPTS_DEBUG(opts)) {
+		main_version();
+	}
+
+	/* generate leaf key */
+	if (opts_has_ssl_spec(opts) && opts->cakey && !opts->leafkey) {
+		opts->leafkey = ssl_key_genrsa(DFLT_LEAFKEY_RSABITS);
+		if (!opts->leafkey) {
 			fprintf(stderr, "%s: error generating RSA key:\n",
 			                argv0);
 			ERR_print_errors_fp(stderr);
 			exit(EXIT_FAILURE);
 		}
 		if (OPTS_DEBUG(opts)) {
-			log_dbg_printf("Generated RSA key for leaf certs.\n");
+			log_dbg_printf("Generated %i bit RSA key for leaf "
+			               "certs.\n", DFLT_LEAFKEY_RSABITS);
 		}
 	}
-
-	if (opts->certgendir) {
+	if (opts->certgendir && opts->leafkey) {
 		char *keyid, *keyfn;
 		int prv;
 		FILE *keyf;
 
-		keyid = ssl_key_identifier(opts->key, 0);
+		keyid = ssl_key_identifier(opts->leafkey, 0);
 		if (!keyid) {
 			fprintf(stderr, "%s: error generating key id\n", argv0);
 			exit(EXIT_FAILURE);
@@ -844,8 +720,8 @@ main(int argc, char *argv[])
 			                strerror(errno), errno);
 			exit(EXIT_FAILURE);
 		}
-		if (!PEM_write_PrivateKey(keyf, opts->key, NULL, 0, 0,
-		                                           NULL, NULL)) {
+		if (!PEM_write_PrivateKey(keyf, opts->leafkey,
+		                          NULL, 0, 0, NULL, NULL)) {
 			fprintf(stderr, "%s: Failed to write key to '%s': "
 			                "%s (%i)\n", argv0, keyfn,
 			                strerror(errno), errno);
@@ -854,15 +730,8 @@ main(int argc, char *argv[])
 		fclose(keyf);
 	}
 
-	/* usage checks after defaults */
-	if (opts->dropgroup && !opts->dropuser) {
-		fprintf(stderr, "%s: -m depends on -u.\n", argv0);
-		exit(EXIT_FAILURE);
-	}
-
-	/* debugging */
+	/* debug log, part 2 */
 	if (OPTS_DEBUG(opts)) {
-		main_version();
 		opts_proto_dbg_dump(opts);
 		log_dbg_printf("proxyspecs:\n");
 		for (proxyspec_t *spec = opts->spec; spec; spec = spec->next) {
@@ -874,6 +743,12 @@ main(int argc, char *argv[])
 			log_dbg_printf("- %s\n", specstr);
 			free(specstr);
 		}
+#ifndef OPENSSL_NO_ENGINE
+		if (opts->openssl_engine) {
+			log_dbg_printf("Loaded OpenSSL engine %s\n",
+			               opts->openssl_engine);
+		}
+#endif /* !OPENSSL_NO_ENGINE */
 		if (opts->cacrt) {
 			char *subj = ssl_x509_subject(opts->cacrt);
 			log_dbg_printf("Loaded CA: '%s'\n", subj);
@@ -884,6 +759,20 @@ main(int argc, char *argv[])
 #endif /* DEBUG_CERTIFICATE */
 		} else {
 			log_dbg_printf("No CA loaded.\n");
+		}
+		log_dbg_printf("SSL/TLS leaf certificates taken from:\n");
+		if (opts->leafcertdir) {
+			log_dbg_printf("- Matching PEM file in %s\n",
+			               opts->leafcertdir);
+		}
+		if (opts->defaultleafcert) {
+			log_dbg_printf("- Default leaf key\n");
+		} else if (opts->cakey) {
+			log_dbg_printf("- Generated on the fly\n");
+		} else if (opts->passthrough) {
+			log_dbg_printf("- Passthrough without decryption\n");
+		} else {
+			log_dbg_printf("- Connection drop\n");
 		}
 	}
 
@@ -905,11 +794,11 @@ main(int argc, char *argv[])
 	}
 
 	/* Load certs before dropping privs but after cachemgr_preinit() */
-	if (opts->tgcrtdir) {
-		if (sys_dir_eachfile(opts->tgcrtdir,
-		                     main_loadtgcrt, opts) == -1) {
+	if (opts->leafcertdir) {
+		if (sys_dir_eachfile(opts->leafcertdir,
+		                     main_load_leafcert, opts) == -1) {
 			fprintf(stderr, "%s: failed to load certs from %s\n",
-			                argv0, opts->tgcrtdir);
+			                argv0, opts->leafcertdir);
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -936,13 +825,15 @@ main(int argc, char *argv[])
 	}
 
 	/* Fork into parent monitor process and (potentially unprivileged)
-	 * child process doing the actual work.  We request 3 privsep client
-	 * sockets: content logger thread, cert writer thread, and the child
-	 * process main thread (main proxy thread) */
-	int clisock[3];
-	if (privsep_fork(opts, clisock, 3) != 0) {
+	 * child process doing the actual work.  We request 6 privsep client
+	 * sockets: five logger threads, and the child process main thread,
+	 * which will become the main proxy thread.  First slot is main thread,
+	 * remaining slots are passed down to log subsystem. */
+	int clisock[6];
+	if (privsep_fork(opts, clisock,
+	                 sizeof(clisock)/sizeof(clisock[0]), &rv) != 0) {
 		/* parent has exited the monitor loop after waiting for child,
-		 * or an error occured */
+		 * or an error occurred */
 		if (opts->pidfile) {
 			sys_pidf_close(pidfd, opts->pidfile);
 		}
@@ -968,13 +859,17 @@ main(int argc, char *argv[])
 		               strerror(errno), errno);
 		exit(EXIT_FAILURE);
 	}
+	log_dbg_printf("Dropped privs to user %s group %s chroot %s\n",
+	               opts->dropuser  ? opts->dropuser  : "-",
+	               opts->dropgroup ? opts->dropgroup : "-",
+	               opts->jaildir   ? opts->jaildir   : "-");
 	if (ssl_reinit() == -1) {
 		fprintf(stderr, "%s: failed to reinit SSL\n", argv0);
 		goto out_sslreinit_failed;
 	}
 
 	/* Post-privdrop/chroot/detach initialization, thread spawning */
-	if (log_init(opts, proxy, clisock[1], clisock[2]) == -1) {
+	if (log_init(opts, proxy, &clisock[1]) == -1) {
 		fprintf(stderr, "%s: failed to init log facility: %s\n",
 		                argv0, strerror(errno));
 		goto out_log_failed;
@@ -987,9 +882,24 @@ main(int argc, char *argv[])
 		log_err_printf("Failed to init NAT state table lookup.\n");
 		goto out_nat_failed;
 	}
-	rv = EXIT_SUCCESS;
 
-	proxy_run(proxy);
+	int proxy_rv = proxy_run(proxy);
+	if (proxy_rv == 0) {
+		rv = EXIT_SUCCESS;
+	} else if (proxy_rv > 0) {
+		/*
+		 * We terminated because of receiving a signal.  For our normal
+		 * termination signals as documented in the man page, we want
+		 * to return with EXIT_SUCCESS.  For other signals, which
+		 * should be considered abnormal terminations, we want to
+		 * return an exit status of 128 + signal number.
+		 */
+		if (proxy_rv == SIGTERM || proxy_rv == SIGINT) {
+			rv = EXIT_SUCCESS;
+		} else {
+			rv = 128 + proxy_rv;
+		}
+	}
 	proxy_free(proxy);
 	nat_fini();
 out_nat_failed:
@@ -1001,6 +911,8 @@ out_log_failed:
 out_parent:
 	opts_free(opts);
 	ssl_fini();
+	if (natengine)
+		free(natengine);
 	return rv;
 }
 

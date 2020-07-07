@@ -1,28 +1,29 @@
-/*
+/*-
  * SSLsplit - transparent SSL/TLS interception
- * Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
- * All rights reserved.
  * https://www.roe.ch/SSLsplit
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+ * All rights reserved.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "proxy.h"
@@ -65,6 +66,7 @@ struct proxy_ctx {
 	struct event *gcev;
 	struct proxy_listener_ctx *lctx;
 	opts_t *opts;
+	int loopbreak_reason;
 };
 
 
@@ -209,7 +211,7 @@ proxy_signal_cb(evutil_socket_t fd, UNUSED short what, void *arg)
 	case SIGQUIT:
 	case SIGINT:
 	case SIGHUP:
-		proxy_loopbreak(ctx);
+		proxy_loopbreak(ctx, fd);
 		break;
 	case SIGUSR1:
 		if (log_reopen() == -1) {
@@ -367,10 +369,11 @@ leave0:
 }
 
 /*
- * Run the event loop.  Returns when the event loop is cancelled by a signal
- * or on failure.
+ * Run the event loop.
+ * Returns 0 on non-signal termination, signal number when the event loop was
+ * cancelled by a signal, or -1 on failure.
  */
-void
+int
 proxy_run(proxy_ctx_t *ctx)
 {
 	if (ctx->opts->detach) {
@@ -383,23 +386,27 @@ proxy_run(proxy_ctx_t *ctx)
 #endif /* PURIFY */
 	if (pxy_thrmgr_run(ctx->thrmgr) == -1) {
 		log_err_printf("Failed to start thread manager\n");
-		return;
+		return -1;
 	}
 	if (OPTS_DEBUG(ctx->opts)) {
 		log_dbg_printf("Starting main event loop.\n");
 	}
 	event_base_dispatch(ctx->evbase);
 	if (OPTS_DEBUG(ctx->opts)) {
-		log_dbg_printf("Main event loop stopped.\n");
+		log_dbg_printf("Main event loop stopped (reason=%i).\n",
+		               ctx->loopbreak_reason);
 	}
+	return ctx->loopbreak_reason;
 }
 
 /*
- * Break the loop of the proxy, causing the proxy_run to return.
+ * Break the loop of the proxy, causing the proxy_run to return, returning
+ * the reason given in reason (signal number, 0 for success, -1 for error).
  */
 void
-proxy_loopbreak(proxy_ctx_t *ctx)
+proxy_loopbreak(proxy_ctx_t *ctx, int reason)
 {
+	ctx->loopbreak_reason = reason;
 	event_base_loopbreak(ctx->evbase);
 }
 

@@ -1,33 +1,33 @@
-/*
+/*-
  * SSLsplit - transparent SSL/TLS interception
- * Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
- * All rights reserved.
  * https://www.roe.ch/SSLsplit
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+ * All rights reserved.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "pxyconn.h"
 
-#include "pxysslshut.h"
 #include "cachemgr.h"
 #include "ssl.h"
 #include "opts.h"
@@ -58,6 +58,19 @@
 #include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+
+
+/*
+ * libevent compatibility
+ */
+#if LIBEVENT_VERSION_NUMBER < 0x02010000
+static void
+bufferevent_openssl_set_allow_dirty_shutdown(UNUSED struct bufferevent *bev,
+                                             UNUSED int allow_dirty_shutdown)
+{
+	return;
+}
+#endif /* LIBEVENT_VERSION_NUMBER < 0x02010000 */
 
 
 /*
@@ -96,9 +109,6 @@ typedef struct pxy_conn_desc {
 #ifdef HAVE_LOCAL_PROCINFO
 /* local process data - filled in iff pid != -1 */
 typedef struct pxy_conn_lproc_desc {
-	struct sockaddr_storage srcaddr;
-	socklen_t srcaddrlen;
-
 	pid_t pid;
 	uid_t uid;
 	gid_t gid;
@@ -165,15 +175,17 @@ typedef struct pxy_conn_ctx {
 #endif /* HAVE_LOCAL_PROCINFO */
 
 	/* content log context */
-	log_content_ctx_t *logctx;
+	log_content_ctx_t logctx;
 
 	/* store fd and fd event while connected is 0 */
 	evutil_socket_t fd;
 	struct event *ev;
 
-	/* original destination address, family and certificate */
-	struct sockaddr_storage addr;
-	socklen_t addrlen;
+	/* original source and destination address, family and certificate */
+	struct sockaddr_storage srcaddr;
+	socklen_t srcaddrlen;
+	struct sockaddr_storage dstaddr;
+	socklen_t dstaddrlen;
 	int af;
 	X509 *origcrt;
 
@@ -187,7 +199,11 @@ typedef struct pxy_conn_ctx {
 } pxy_conn_ctx_t;
 
 #define WANT_CONNECT_LOG(ctx)	((ctx)->opts->connectlog||!(ctx)->opts->detach)
-#define WANT_CONTENT_LOG(ctx)	((ctx)->opts->contentlog&&!(ctx)->passthrough)
+#ifndef WITHOUT_MIRROR
+#define WANT_CONTENT_LOG(ctx)	(((ctx)->opts->contentlog||(ctx)->opts->pcaplog||(ctx)->opts->mirrorif)&&!(ctx)->passthrough)
+#else /* WITHOUT_MIRROR */
+#define WANT_CONTENT_LOG(ctx)	(((ctx)->opts->contentlog||(ctx)->opts->pcaplog)&&!(ctx)->passthrough)
+#endif /* WITHOUT_MIRROR */
 
 static pxy_conn_ctx_t *
 pxy_conn_ctx_new(proxyspec_t *spec, opts_t *opts,
@@ -228,7 +244,7 @@ pxy_conn_ctx_free(pxy_conn_ctx_t *ctx, int by_requestor)
 		                (void*)ctx);
 	}
 #endif /* DEBUG_PROXY */
-	if (WANT_CONTENT_LOG(ctx) && ctx->logctx) {
+	if (WANT_CONTENT_LOG(ctx)) {
 		if (log_content_close(&ctx->logctx, by_requestor) == -1) {
 			log_err_printf("Warning: Content log close failed\n");
 		}
@@ -312,7 +328,7 @@ static int pxy_ossl_servername_cb(SSL *ssl, int *al, void *arg);
 #endif /* !OPENSSL_NO_TLSEXT */
 static int pxy_ossl_sessnew_cb(SSL *, SSL_SESSION *);
 static void pxy_ossl_sessremove_cb(SSL_CTX *, SSL_SESSION *);
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x20800000L)
 static SSL_SESSION * pxy_ossl_sessget_cb(SSL *, unsigned char *, int, int *);
 #else /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
 static SSL_SESSION * pxy_ossl_sessget_cb(SSL *, const unsigned char *, int,
@@ -373,7 +389,7 @@ pxy_log_connect_nonhttp(pxy_conn_ctx_t *ctx)
 			goto out;
 		}
 	} else {
-		lpi = "";
+		lpi = "-";
 	}
 #endif /* HAVE_LOCAL_PROCINFO */
 
@@ -477,6 +493,8 @@ pxy_log_connect_http(pxy_conn_ctx_t *ctx)
 			ctx->enomem = 1;
 			goto out;
 		}
+	} else {
+		lpi = "-";
 	}
 #endif /* HAVE_LOCAL_PROCINFO */
 
@@ -553,7 +571,7 @@ pxy_log_connect_http(pxy_conn_ctx_t *ctx)
 	}
 out:
 #ifdef HAVE_LOCAL_PROCINFO
-	if (lpi) {
+	if (lpi && ctx->opts->lprocinfo) {
 		free(lpi);
 	}
 #endif /* HAVE_LOCAL_PROCINFO */
@@ -624,7 +642,7 @@ pxy_ossl_sessremove_cb(UNUSED SSL_CTX *sslctx, SSL_SESSION *sess)
  * Called by OpenSSL when a src SSL session is requested by the client.
  */
 static SSL_SESSION *
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x20800000L)
 pxy_ossl_sessget_cb(UNUSED SSL *ssl, unsigned char *id, int idlen,
                     int *copy)
 #else /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
@@ -671,18 +689,14 @@ pxy_sslctx_setoptions(SSL_CTX *sslctx, pxy_conn_ctx_t *ctx)
 	SSL_CTX_set_options(sslctx, SSL_OP_NO_TICKET);
 #endif /* SSL_OP_NO_TICKET */
 
-	/*
-	 * Do not use HAVE_SSLV2 because we need to set SSL_OP_NO_SSLv2 if it
-	 * is available and WITH_SSLV2 was not used.
-	 */
 #ifdef SSL_OP_NO_SSLv2
-#ifdef WITH_SSLV2
+#ifdef HAVE_SSLV2
 	if (ctx->opts->no_ssl2) {
-#endif /* WITH_SSLV2 */
+#endif /* HAVE_SSLV2 */
 		SSL_CTX_set_options(sslctx, SSL_OP_NO_SSLv2);
-#ifdef WITH_SSLV2
+#ifdef HAVE_SSLV2
 	}
-#endif /* WITH_SSLV2 */
+#endif /* HAVE_SSLV2 */
 #endif /* !SSL_OP_NO_SSLv2 */
 #ifdef HAVE_SSLV3
 	if (ctx->opts->no_ssl3) {
@@ -712,6 +726,20 @@ pxy_sslctx_setoptions(SSL_CTX *sslctx, pxy_conn_ctx_t *ctx)
 #endif /* SSL_OP_NO_COMPRESSION */
 
 	SSL_CTX_set_cipher_list(sslctx, ctx->opts->ciphers);
+
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
+	/*
+	 * For maximum interoperability, force the security level to 0, meaning
+	 * all algorithms are permitted.  If we don't set the security level,
+	 * the level is taken from OpenSSL system configuration or library
+	 * compile-time defaults.  Security levels above 0 will reject weak
+	 * algorithms and key sizes both locally at load time and when they are
+	 * encountered from peers we receive connections from or connect to.
+	 * Specifically, our prevous default RSA leaf key size of 1024 bits
+	 * was rejected by a security level of 2 or higher (issue #248).
+	 */
+	SSL_CTX_set_security_level(sslctx, 0);
+#endif /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
 }
 
 /*
@@ -723,10 +751,22 @@ pxy_srcsslctx_create(pxy_conn_ctx_t *ctx, X509 *crt, STACK_OF(X509) *chain,
                      EVP_PKEY *key)
 {
 	SSL_CTX *sslctx = SSL_CTX_new(ctx->opts->sslmethod());
-	if (!sslctx)
+	if (!sslctx) {
+		ctx->enomem = 1;
 		return NULL;
+	}
 
 	pxy_sslctx_setoptions(sslctx, ctx);
+
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
+	if (ctx->opts->sslversion) {
+		if (SSL_CTX_set_min_proto_version(sslctx, ctx->opts->sslversion) == 0 ||
+			SSL_CTX_set_max_proto_version(sslctx, ctx->opts->sslversion) == 0) {
+			SSL_CTX_free(sslctx);
+			return NULL;
+		}
+	}
+#endif /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
 
 	SSL_CTX_sess_set_new_cb(sslctx, pxy_ossl_sessnew_cb);
 	SSL_CTX_sess_set_remove_cb(sslctx, pxy_ossl_sessremove_cb);
@@ -759,8 +799,16 @@ pxy_srcsslctx_create(pxy_conn_ctx_t *ctx, X509 *crt, STACK_OF(X509) *chain,
 		EC_KEY_free(ecdh);
 	}
 #endif /* !OPENSSL_NO_ECDH */
-	SSL_CTX_use_certificate(sslctx, crt);
-	SSL_CTX_use_PrivateKey(sslctx, key);
+	if (SSL_CTX_use_certificate(sslctx, crt) != 1) {
+		log_dbg_printf("loading src server certificate failed\n");
+		SSL_CTX_free(sslctx);
+		return NULL;
+	}
+	if (SSL_CTX_use_PrivateKey(sslctx, key) != 1) {
+		log_dbg_printf("loading src server key failed\n");
+		SSL_CTX_free(sslctx);
+		return NULL;
+	}
 	for (int i = 0; i < sk_X509_num(chain); i++) {
 		X509 *c = sk_X509_value(chain, i);
 		ssl_x509_refcount_inc(c); /* next call consumes a reference */
@@ -836,7 +884,7 @@ pxy_srccert_create(pxy_conn_ctx_t *ctx)
 {
 	cert_t *cert = NULL;
 
-	if (ctx->opts->tgcrtdir) {
+	if (ctx->opts->leafcertdir) {
 		if (ctx->sni) {
 			cert = cachemgr_tgcrt_get(ctx->sni);
 			if (!cert) {
@@ -864,6 +912,7 @@ pxy_srccert_create(pxy_conn_ctx_t *ctx)
 					if (!wildcarded) {
 						ctx->enomem = 1;
 					} else {
+						/* increases ref count */
 						cert = cachemgr_tgcrt_get(
 						       wildcarded);
 						free(wildcarded);
@@ -885,26 +934,37 @@ pxy_srccert_create(pxy_conn_ctx_t *ctx)
 		}
 	}
 
-	if (!cert && ctx->origcrt && ctx->opts->key) {
+	if (!cert && ctx->opts->defaultleafcert) {
+		cert = ctx->opts->defaultleafcert;
+		cert_refcount_inc(cert);
+		ctx->immutable_cert = 1;
+		if (OPTS_DEBUG(ctx->opts)) {
+			log_dbg_printf("Using default leaf certificate\n");
+		}
+	}
+
+	if (!cert && ctx->origcrt && ctx->opts->leafkey) {
 		cert = cert_new();
 
 		cert->crt = cachemgr_fkcrt_get(ctx->origcrt);
 		if (cert->crt) {
-			if (OPTS_DEBUG(ctx->opts))
+			if (OPTS_DEBUG(ctx->opts)) {
 				log_dbg_printf("Certificate cache: HIT\n");
+			}
 		} else {
-			if (OPTS_DEBUG(ctx->opts))
+			if (OPTS_DEBUG(ctx->opts)) {
 				log_dbg_printf("Certificate cache: MISS\n");
+			}
 			cert->crt = ssl_x509_forge(ctx->opts->cacrt,
 			                           ctx->opts->cakey,
 			                           ctx->origcrt,
-			                           ctx->opts->key,
+			                           ctx->opts->leafkey,
 			                           NULL,
-			                           ctx->opts->crlurl);
+			                           ctx->opts->leafcrlurl);
 			cachemgr_fkcrt_set(ctx->origcrt, cert->crt);
 		}
-		cert_set_key(cert, ctx->opts->key);
-		cert_set_chain(cert, ctx->opts->chain);
+		cert_set_key(cert, ctx->opts->leafkey);
+		cert_set_chain(cert, ctx->opts->cachain);
 		ctx->generated_cert = 1;
 	}
 
@@ -933,8 +993,8 @@ pxy_srcssl_create(pxy_conn_ctx_t *ctx, SSL *origssl)
 {
 	cert_t *cert;
 
-	cachemgr_dsess_set((struct sockaddr*)&ctx->addr,
-	                   ctx->addrlen, ctx->sni,
+	cachemgr_dsess_set((struct sockaddr*)&ctx->dstaddr,
+	                   ctx->dstaddrlen, ctx->sni,
 	                   SSL_get0_session(origssl));
 
 	ctx->origcrt = SSL_get_peer_certificate(origssl);
@@ -968,10 +1028,8 @@ pxy_srcssl_create(pxy_conn_ctx_t *ctx, SSL *origssl)
 	SSL_CTX *sslctx = pxy_srcsslctx_create(ctx, cert->crt, cert->chain,
 	                                       cert->key);
 	cert_free(cert);
-	if (!sslctx) {
-		ctx->enomem = 1;
+	if (!sslctx)
 		return NULL;
-	}
 	SSL *ssl = SSL_new(sslctx);
 	SSL_CTX_free(sslctx); /* SSL_new() increments refcount */
 	if (!ssl) {
@@ -1037,7 +1095,7 @@ pxy_ossl_servername_cb(SSL *ssl, UNUSED int *al, void *arg)
 
 	/* generate a new certificate with sn as additional altSubjectName
 	 * and replace it both in the current SSL ctx and in the cert cache */
-	if (!ctx->immutable_cert &&
+	if (ctx->opts->allow_wrong_host && !ctx->immutable_cert &&
 	    !ssl_x509_names_match((sslcrt = SSL_get_certificate(ssl)), sn)) {
 		X509 *newcrt;
 		SSL_CTX *newsslctx;
@@ -1047,8 +1105,8 @@ pxy_ossl_servername_cb(SSL *ssl, UNUSED int *al, void *arg)
 			               "(SNI mismatch)\n");
 		}
 		newcrt = ssl_x509_forge(ctx->opts->cacrt, ctx->opts->cakey,
-		                        sslcrt, ctx->opts->key,
-		                        sn, ctx->opts->crlurl);
+		                        sslcrt, ctx->opts->leafkey,
+		                        sn, ctx->opts->leafcrlurl);
 		if (!newcrt) {
 			ctx->enomem = 1;
 			return SSL_TLSEXT_ERR_NOACK;
@@ -1079,11 +1137,11 @@ pxy_ossl_servername_cb(SSL *ssl, UNUSED int *al, void *arg)
 			}
 		}
 
-		newsslctx = pxy_srcsslctx_create(ctx, newcrt, ctx->opts->chain,
-		                                 ctx->opts->key);
+		newsslctx = pxy_srcsslctx_create(ctx, newcrt,
+		                                 ctx->opts->cachain,
+		                                 ctx->opts->leafkey);
 		if (!newsslctx) {
 			X509_free(newcrt);
-			ctx->enomem = 1;
 			return SSL_TLSEXT_ERR_NOACK;
 		}
 		SSL_set_SSL_CTX(ssl, newsslctx); /* decr's old incr new refc */
@@ -1117,7 +1175,35 @@ pxy_dstssl_create(pxy_conn_ctx_t *ctx)
 
 	pxy_sslctx_setoptions(sslctx, ctx);
 
-	SSL_CTX_set_verify(sslctx, SSL_VERIFY_NONE, NULL);
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
+	if (ctx->opts->sslversion) {
+		if (SSL_CTX_set_min_proto_version(sslctx, ctx->opts->sslversion) == 0 ||
+			SSL_CTX_set_max_proto_version(sslctx, ctx->opts->sslversion) == 0) {
+			SSL_CTX_free(sslctx);
+			return NULL;
+		}
+	}
+#endif /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
+
+	if (ctx->opts->verify_peer) {
+		SSL_CTX_set_verify(sslctx, SSL_VERIFY_PEER, NULL);
+		SSL_CTX_set_default_verify_paths(sslctx);
+	} else {
+		SSL_CTX_set_verify(sslctx, SSL_VERIFY_NONE, NULL);
+	}
+
+	if (ctx->opts->clientcrt &&
+	    (SSL_CTX_use_certificate(sslctx, ctx->opts->clientcrt) != 1)) {
+		log_dbg_printf("loading dst client certificate failed\n");
+		SSL_CTX_free(sslctx);
+		return NULL;
+	}
+	if (ctx->opts->clientkey &&
+	    (SSL_CTX_use_PrivateKey(sslctx, ctx->opts->clientkey) != 1)) {
+		log_dbg_printf("loading dst client key failed\n");
+		SSL_CTX_free(sslctx);
+		return NULL;
+	}
 
 	ssl = SSL_new(sslctx);
 	SSL_CTX_free(sslctx); /* SSL_new() increments refcount */
@@ -1137,8 +1223,8 @@ pxy_dstssl_create(pxy_conn_ctx_t *ctx)
 #endif /* SSL_MODE_RELEASE_BUFFERS */
 
 	/* session resuming based on remote endpoint address and port */
-	sess = cachemgr_dsess_get((struct sockaddr *)&ctx->addr,
-	                          ctx->addrlen, ctx->sni); /* new sess inst */
+	sess = cachemgr_dsess_get((struct sockaddr *)&ctx->dstaddr,
+	                          ctx->dstaddrlen, ctx->sni);
 	if (sess) {
 		if (OPTS_DEBUG(ctx->opts)) {
 			log_dbg_printf("Attempt reuse dst SSL session\n");
@@ -1157,12 +1243,9 @@ pxy_dstssl_create(pxy_conn_ctx_t *ctx)
 static void
 bufferevent_free_and_close_fd(struct bufferevent *bev, pxy_conn_ctx_t *ctx)
 {
-	evutil_socket_t fd = bufferevent_getfd(bev);
-	SSL *ssl = NULL;
-
-	if ((ctx->spec->ssl || ctx->clienthello_found) && !ctx->passthrough) {
-		ssl = bufferevent_openssl_get_ssl(bev); /* does not inc refc */
-	}
+	struct bufferevent *ubev;
+	evutil_socket_t fd;
+	SSL *ssl;
 
 #ifdef DEBUG_PROXY
 	if (OPTS_DEBUG(ctx->opts)) {
@@ -1171,13 +1254,57 @@ bufferevent_free_and_close_fd(struct bufferevent *bev, pxy_conn_ctx_t *ctx)
 	}
 #endif /* DEBUG_PROXY */
 
-	bufferevent_free(bev); /* does not free SSL unless the option
-	                          BEV_OPT_CLOSE_ON_FREE was set */
-	if (ssl) {
-		pxy_ssl_shutdown(ctx->opts, ctx->evbase, ssl, fd);
+	ubev = bufferevent_get_underlying(bev);
+	ssl = bufferevent_openssl_get_ssl(bev); /* does not inc refc */
+
+	if (ubev) {
+		fd = bufferevent_getfd(ubev);
 	} else {
-		evutil_closesocket(fd);
+		fd = bufferevent_getfd(bev);
 	}
+	bufferevent_setcb(bev, NULL, NULL, NULL, NULL);
+
+	if (ssl) {
+		/*
+		 * From the libevent book:  SSL_RECEIVED_SHUTDOWN tells
+		 * SSL_shutdown to act as if we had already received a close
+		 * notify from the other end.  SSL_shutdown will then send the
+		 * final close notify in reply.  The other end will receive the
+		 * close notify and send theirs.  By this time, we will have
+		 * already closed the socket and the other end's real close
+		 * notify will never be received.  In effect, both sides will
+		 * think that they have completed a clean shutdown and keep
+		 * their sessions valid.  This strategy will fail if the socket
+		 * is not ready for writing, in which case this hack will lead
+		 * to an unclean shutdown and lost session on the other end.
+		 *
+		 * Note that in the case of autossl, the SSL object operates on
+		 * a BIO wrapper around the underlying bufferevent.
+		 */
+		SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
+		SSL_shutdown(ssl);
+	}
+
+	bufferevent_disable(bev, EV_READ|EV_WRITE);
+	if (ubev) {
+		bufferevent_disable(ubev, EV_READ|EV_WRITE);
+		bufferevent_setfd(ubev, -1);
+		bufferevent_setcb(ubev, NULL, NULL, NULL, NULL);
+		bufferevent_free(ubev);
+	}
+	bufferevent_free(bev);
+	if (ssl) {
+		if (OPTS_DEBUG(ctx->opts)) {
+			log_dbg_printf("SSL_free() in state ");
+			log_dbg_print_free(ssl_ssl_state_to_str(ssl));
+			log_dbg_printf("\n");
+		}
+		SSL_free(ssl);
+	}
+	/* bufferevent_getfd() returns -1 if no file descriptor is associated
+	 * with the bufferevent */
+	if (fd >= 0)
+		evutil_closesocket(fd);
 }
 
 /*
@@ -1209,13 +1336,9 @@ pxy_bufferevent_setup(pxy_conn_ctx_t *ctx, evutil_socket_t fd, SSL *ssl)
 		log_err_printf("Error creating bufferevent socket\n");
 		return NULL;
 	}
-#if LIBEVENT_VERSION_NUMBER >= 0x02010000
 	if (ssl) {
-		/* Prevent unclean (dirty) shutdowns to cause error
-		 * events on the SSL socket bufferevent. */
 		bufferevent_openssl_set_allow_dirty_shutdown(bev, 1);
 	}
-#endif /* LIBEVENT_VERSION_NUMBER >= 0x02010000 */
 	bufferevent_setcb(bev, pxy_bev_readcb, pxy_bev_writecb,
 	                  pxy_bev_eventcb, ctx);
 	bufferevent_enable(bev, EV_READ|EV_WRITE);
@@ -1289,6 +1412,7 @@ pxy_http_reqhdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 				ctx->enomem = 1;
 				return NULL;
 			}
+		/* Override Connection: keepalive and Connection: upgrade */
 		} else if (!strncasecmp(line, "Connection:", 11)) {
 			ctx->sent_http_conn_close = 1;
 			if (!(newhdr = strdup("Connection: close"))) {
@@ -1296,7 +1420,10 @@ pxy_http_reqhdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 				return NULL;
 			}
 			return newhdr;
-		} else if (!strncasecmp(line, "Accept-Encoding:", 16) ||
+		/* Suppress upgrading to SSL/TLS, WebSockets or HTTP/2,
+		 * unsupported encodings, and keep-alive */
+		} else if (!strncasecmp(line, "Upgrade:", 8) ||
+		           !strncasecmp(line, "Accept-Encoding:", 16) ||
 		           !strncasecmp(line, "Keep-Alive:", 11)) {
 			return NULL;
 		} else if (line[0] == '\0') {
@@ -1378,9 +1505,17 @@ pxy_http_resphdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 		    /* HSTS: HTTP Strict Transport Security (RFC 6797)
 		     * remove to allow users to accept bad certs */
 		    !strncasecmp(line, "Strict-Transport-Security:", 26) ||
+		    /* Expect-CT: Expect Certificate Transparency
+		     * (draft-ietf-httpbis-expect-ct-latest)
+		     * remove to prevent failed CT log lookups */
+		    !strncasecmp(line, "Expect-CT:", 10) ||
 		    /* Alternate Protocol
 		     * remove to prevent switching to QUIC, SPDY et al */
-		    !strncasecmp(line, "Alternate-Protocol:", 19)) {
+		    !strncasecmp(line, "Alternate-Protocol:", 19) ||
+		    /* Upgrade header
+		     * remove to prevent upgrading to HTTPS in unhandled ways,
+		     * and more importantly, WebSockets and HTTP/2 */
+		    !strncasecmp(line, "Upgrade:", 8)) {
 			return NULL;
 		} else if (line[0] == '\0') {
 			ctx->seen_resp_header = 1;
@@ -1482,11 +1617,10 @@ deny:
 	if (evbuffer_get_length(inbuf) > 0) {
 		if (WANT_CONTENT_LOG(ctx)) {
 			logbuf_t *lb;
-			lb = logbuf_new_alloc(evbuffer_get_length(inbuf),
-			                      NULL, NULL);
+			lb = logbuf_new_alloc(evbuffer_get_length(inbuf), NULL);
 			if (lb &&
 			    (evbuffer_copyout(inbuf, lb->buf, lb->sz) != -1)) {
-				if (log_content_submit(ctx->logctx, lb,
+				if (log_content_submit(&ctx->logctx, lb,
 				                       1/*req*/) == -1) {
 					logbuf_free(lb);
 					log_err_printf("Warning: Content log "
@@ -1503,10 +1637,9 @@ deny:
 	ctx->ocsp_denied = 1;
 	if (WANT_CONTENT_LOG(ctx)) {
 		logbuf_t *lb;
-		lb = logbuf_new_copy(ocspresp, sizeof(ocspresp) - 1,
-		                     NULL, NULL);
+		lb = logbuf_new_copy(ocspresp, sizeof(ocspresp) - 1, NULL);
 		if (lb) {
-			if (log_content_submit(ctx->logctx, lb,
+			if (log_content_submit(&ctx->logctx, lb,
 			                       0/*resp*/) == -1) {
 				logbuf_free(lb);
 				log_err_printf("Warning: Content log "
@@ -1561,6 +1694,8 @@ pxy_conn_autossl_peek_and_upgrade(pxy_conn_ctx_t *ctx)
 			if (!ctx->dst.bev) {
 				return 0;
 			}
+			bufferevent_openssl_set_allow_dirty_shutdown(
+			                                      ctx->dst.bev, 1);
 			bufferevent_setcb(ctx->dst.bev, pxy_bev_readcb,
 			                  pxy_bev_writecb, pxy_bev_eventcb,
 			                  ctx);
@@ -1649,8 +1784,7 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 			char *replace;
 			if (WANT_CONTENT_LOG(ctx)) {
 				logbuf_t *tmp;
-				tmp = logbuf_new_printf(NULL, NULL,
-				                        "%s\r\n", line);
+				tmp = logbuf_new_printf(NULL, "%s\r\n", line);
 				if (tail) {
 					if (tmp) {
 						tail->next = tmp;
@@ -1677,7 +1811,7 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 			}
 		}
 		if (lb && WANT_CONTENT_LOG(ctx)) {
-			if (log_content_submit(ctx->logctx, lb,
+			if (log_content_submit(&ctx->logctx, lb,
 			                       1/*req*/) == -1) {
 				logbuf_free(lb);
 				log_err_printf("Warning: Content log "
@@ -1697,8 +1831,7 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 			char *replace;
 			if (WANT_CONTENT_LOG(ctx)) {
 				logbuf_t *tmp;
-				tmp = logbuf_new_printf(NULL, NULL,
-				                        "%s\r\n", line);
+				tmp = logbuf_new_printf(NULL, "%s\r\n", line);
 				if (tail) {
 					if (tmp) {
 						tail->next = tmp;
@@ -1725,7 +1858,7 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 			}
 		}
 		if (lb && WANT_CONTENT_LOG(ctx)) {
-			if (log_content_submit(ctx->logctx, lb,
+			if (log_content_submit(&ctx->logctx, lb,
 			                       0/*resp*/) == -1) {
 				logbuf_free(lb);
 				log_err_printf("Warning: Content log "
@@ -1748,9 +1881,9 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 
 	if (WANT_CONTENT_LOG(ctx)) {
 		logbuf_t *lb;
-		lb = logbuf_new_alloc(evbuffer_get_length(inbuf), NULL, NULL);
+		lb = logbuf_new_alloc(evbuffer_get_length(inbuf), NULL);
 		if (lb && (evbuffer_copyout(inbuf, lb->buf, lb->sz) != -1)) {
-			if (log_content_submit(ctx->logctx, lb,
+			if (log_content_submit(&ctx->logctx, lb,
 			                       (bev == ctx->src.bev)) == -1) {
 				logbuf_free(lb);
 				log_err_printf("Warning: Content log "
@@ -1873,6 +2006,8 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 			               BUFFEREVENT_SSL_ACCEPTING,
 			               BEV_OPT_DEFER_CALLBACKS);
 			if (ctx->src.bev) {
+				bufferevent_openssl_set_allow_dirty_shutdown(
+				                              ctx->src.bev, 1);
 				bufferevent_setcb(ctx->src.bev,
 				                  pxy_bev_readcb,
 				                  pxy_bev_writecb,
@@ -1898,8 +2033,16 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 
 		/* prepare logging, part 2 */
 		if (WANT_CONNECT_LOG(ctx) || WANT_CONTENT_LOG(ctx)) {
+			if (ctx->dsthost_str) {
+				free(ctx->dsthost_str);
+				ctx->dsthost_str = NULL;
+			}
+			if (ctx->dstport_str) {
+				free(ctx->dstport_str);
+				ctx->dstport_str = NULL;
+			}
 			if (sys_sockaddr_str((struct sockaddr *)
-			                     &ctx->addr, ctx->addrlen,
+			                     &ctx->dstaddr, ctx->dstaddrlen,
 			                     &ctx->dsthost_str,
 			                     &ctx->dstport_str) != 0) {
 				ctx->enomem = 1;
@@ -1911,8 +2054,8 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 			if (ctx->opts->lprocinfo) {
 				/* fetch process info */
 				if (proc_pid_for_addr(&ctx->lproc.pid,
-				        (struct sockaddr*)&ctx->lproc.srcaddr,
-				        ctx->lproc.srcaddrlen) == 0 &&
+				        (struct sockaddr*)&ctx->srcaddr,
+				        ctx->srcaddrlen) == 0 &&
 				    ctx->lproc.pid != -1 &&
 				    proc_get_info(ctx->lproc.pid,
 				                  &ctx->lproc.exec_path,
@@ -1935,6 +2078,10 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 		}
 		if (WANT_CONTENT_LOG(ctx)) {
 			if (log_content_open(&ctx->logctx, ctx->opts,
+			                     (struct sockaddr *)&ctx->srcaddr,
+			                     ctx->srcaddrlen,
+			                     (struct sockaddr *)&ctx->dstaddr,
+			                     ctx->dstaddrlen,
 			                     ctx->srchost_str, ctx->srcport_str,
 			                     ctx->dsthost_str, ctx->dstport_str,
 #ifdef HAVE_LOCAL_PROCINFO
@@ -2142,11 +2289,11 @@ connected:
 			                    bufferevent_get_input(bev)),
 			                evbuffer_get_length(
 			                    bufferevent_get_output(bev)),
-			                evbuffer_get_length(
-			                    other->closed ? 0 :
+							other->closed ? 0 :
+			                    evbuffer_get_length(
 			                    bufferevent_get_input(other->bev)),
-			                evbuffer_get_length(
-			                    other->closed ? 0 :
+							other->closed ? 0 :
+			                    evbuffer_get_length(
 			                    bufferevent_get_output(other->bev))
 			                );
 		}
@@ -2184,7 +2331,8 @@ leave:
 	if (OPTS_DEBUG(ctx->opts)) {
 		log_dbg_printf("%s disconnected to [%s]:%s\n",
 		               this->ssl ? "SSL" : "TCP",
-		               ctx->dsthost_str, ctx->dstport_str);
+		               STRORDASH(ctx->dsthost_str),
+		               STRORDASH(ctx->dstport_str));
 		log_dbg_printf("%s disconnected from [%s]:%s\n",
 		               this->ssl ? "SSL" : "TCP",
 		               ctx->srchost_str, ctx->srcport_str);
@@ -2205,7 +2353,7 @@ leave:
 static void
 pxy_conn_connect(pxy_conn_ctx_t *ctx)
 {
-	if (!ctx->addrlen) {
+	if (!ctx->dstaddrlen) {
 		log_err_printf("No target address; aborting connection\n");
 		evutil_closesocket(ctx->fd);
 		pxy_conn_ctx_free(ctx, 1);
@@ -2235,8 +2383,8 @@ pxy_conn_connect(pxy_conn_ctx_t *ctx)
 
 	if (OPTS_DEBUG(ctx->opts)) {
 		char *host, *port;
-		if (sys_sockaddr_str((struct sockaddr *)&ctx->addr,
-		                     ctx->addrlen, &host, &port) != 0) {
+		if (sys_sockaddr_str((struct sockaddr *)&ctx->dstaddr,
+		                     ctx->dstaddrlen, &host, &port) != 0) {
 			log_dbg_printf("Connecting to [?]:?\n");
 		} else {
 			log_dbg_printf("Connecting to [%s]:%s\n", host, port);
@@ -2247,8 +2395,8 @@ pxy_conn_connect(pxy_conn_ctx_t *ctx)
 
 	/* initiate connection */
 	bufferevent_socket_connect(ctx->dst.bev,
-	                           (struct sockaddr *)&ctx->addr,
-	                           ctx->addrlen);
+	                           (struct sockaddr *)&ctx->dstaddr,
+	                           ctx->dstaddrlen);
 }
 
 #ifndef OPENSSL_NO_TLSEXT
@@ -2269,8 +2417,8 @@ pxy_sni_resolve_cb(int errcode, struct evutil_addrinfo *ai, void *arg)
 		return;
 	}
 
-	memcpy(&ctx->addr, ai->ai_addr, ai->ai_addrlen);
-	ctx->addrlen = ai->ai_addrlen;
+	memcpy(&ctx->dstaddr, ai->ai_addr, ai->ai_addrlen);
+	ctx->dstaddrlen = ai->ai_addrlen;
 	evutil_freeaddrinfo(ai);
 	pxy_conn_connect(ctx);
 }
@@ -2360,7 +2508,7 @@ pxy_fd_readcb(MAYBE_UNUSED evutil_socket_t fd, UNUSED short what, void *arg)
 		ctx->ev = NULL;
 	}
 
-	if (ctx->sni && !ctx->addrlen && ctx->spec->sni_port) {
+	if (ctx->sni && !ctx->dstaddrlen && ctx->spec->sni_port) {
 		char sniport[6];
 		struct evutil_addrinfo hints;
 
@@ -2412,8 +2560,9 @@ pxy_conn_setup(evutil_socket_t fd,
 	/* determine original destination of connection */
 	if (spec->natlookup) {
 		/* NAT engine lookup */
-		ctx->addrlen = sizeof(struct sockaddr_storage);
-		if (spec->natlookup((struct sockaddr *)&ctx->addr, &ctx->addrlen,
+		ctx->dstaddrlen = sizeof(struct sockaddr_storage);
+		if (spec->natlookup((struct sockaddr *)&ctx->dstaddr,
+		                    &ctx->dstaddrlen,
 		                    fd, peeraddr, peeraddrlen) == -1) {
 			log_err_printf("Connection not found in NAT "
 			               "state table, aborting connection\n");
@@ -2423,8 +2572,8 @@ pxy_conn_setup(evutil_socket_t fd,
 		}
 	} else if (spec->connect_addrlen > 0) {
 		/* static forwarding */
-		ctx->addrlen = spec->connect_addrlen;
-		memcpy(&ctx->addr, &spec->connect_addr, ctx->addrlen);
+		ctx->dstaddrlen = spec->connect_addrlen;
+		memcpy(&ctx->dstaddr, &spec->connect_addr, ctx->dstaddrlen);
 	} else {
 		/* SNI mode */
 		if (!ctx->spec->ssl) {
@@ -2438,17 +2587,22 @@ pxy_conn_setup(evutil_socket_t fd,
 	}
 
 	/* prepare logging, part 1 */
+	if (opts->pcaplog
+#ifndef WITHOUT_MIRROR
+	    || opts->mirrorif
+#endif /* !WITHOUT_MIRROR */
+#ifdef HAVE_LOCAL_PROCINFO
+	    || opts->lprocinfo
+#endif /* HAVE_LOCAL_PROCINFO */
+	    ) {
+		ctx->srcaddrlen = peeraddrlen;
+		memcpy(&ctx->srcaddr, peeraddr, ctx->srcaddrlen);
+	}
 	if (WANT_CONNECT_LOG(ctx) || WANT_CONTENT_LOG(ctx)) {
 		if (sys_sockaddr_str(peeraddr, peeraddrlen,
 		                     &ctx->srchost_str,
 		                     &ctx->srcport_str) != 0)
 			goto memout;
-#ifdef HAVE_LOCAL_PROCINFO
-		if (ctx->opts->lprocinfo) {
-			memcpy(&ctx->lproc.srcaddr, peeraddr, peeraddrlen);
-			ctx->lproc.srcaddrlen = peeraddrlen;
-		}
-#endif /* HAVE_LOCAL_PROCINFO */
 	}
 
 	/* for SSL, defer dst connection setup to initial_readcb */

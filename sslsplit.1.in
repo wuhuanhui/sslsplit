@@ -1,44 +1,47 @@
+.\"-
 .\" SSLsplit - transparent SSL/TLS interception
-.\" Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
-.\" All rights reserved.
 .\" https://www.roe.ch/SSLsplit
 .\"
+.\" Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+.\" All rights reserved.
+.\"
 .\" Redistribution and use in source and binary forms, with or without
-.\" modification, are permitted provided that the following conditions
-.\" are met:
-.\" 1. Redistributions of source code must retain the above copyright
-.\"    notice, this list of conditions, and the following disclaimer.
-.\" 2. Redistributions in binary form must reproduce the above copyright
-.\"    notice, this list of conditions and the following disclaimer in the
-.\"    documentation and/or other materials provided with the distribution.
+.\" modification, are permitted provided that the following conditions are met:
+.\" 1. Redistributions of source code must retain the above copyright notice,
+.\"    this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright notice,
+.\"    this list of conditions and the following disclaimer in the documentation
+.\"    and/or other materials provided with the distribution.
 .\"
-.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
-.\" IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-.\" OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
-.\" IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
-.\" INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
-.\" NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-.\" DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-.\" THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-.\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
-.\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-.\"
-.TH SSLSPLIT 1  "1 April 2012"
+.\" THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+.\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+.\" LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+.\" CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+.\" SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+.\" INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+.\" CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+.\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+.\" POSSIBILITY OF SUCH DAMAGE.
+.TH "sslsplit" "1" "@@DATE@@" "sslsplit @@VERSION@@" "SSLsplit"
 .SH NAME
 sslsplit \-\- transparent SSL/TLS interception
 .SH SYNOPSIS
 .na
 .B sslsplit
-[\fB-kCKqwWOPZdDgGsrReumjplLSFiM\fP] \fB-c\fP \fIpem\fP
+[\fB-kCKqwWOPZdDgGsrRxeumjplLSFXYyTIMiab\fP] \fB-c\fP \fIpem\fP
 \fIproxyspecs\fP [...]
 .br
 .B sslsplit
-[\fB-kCKqwWOPZdDgGsrReumjplLSFiM\fP] \fB-c\fP \fIpem\fP \fB-t\fP \fIdir\fP
+[\fB-kCKqwWOPZdDgGsrRxeumjplLSFXYyTIMiab\fP] \fB-c\fP \fIpem\fP \fB-t\fP \fIdir\fP
 \fIproxyspecs\fP [...]
 .br
 .B sslsplit
-[\fB-OPZwWdDgGsrReumjplLSFiM\fP] \fB-t\fP \fIdir\fP
+[\fB-OPZwWdDgGsrRxeumjplLSFXYyTIMiab\fP] \fB-t\fP \fIdir\fP
 \fIproxyspecs\fP [...]
+.br
+.B sslsplit [\fB-kCKwWOPZdDgGsrRxeumjplLSFXYyTIMi\fP] -f \fIconffile\fP
 .br
 .B sslsplit -E
 .br
@@ -64,7 +67,8 @@ See NAT ENGINES and PROXY SPECIFICATIONS below for specifics on the different
 modes of operation.
 .LP
 SSLsplit supports plain TCP, plain SSL, HTTP and HTTPS connections over both
-IPv4 and IPv6.
+IPv4 and IPv6.  It also has the ability to dynamically upgrade plain TCP to SSL
+in order to generically support SMTP STARTTLS and similar upgrade mechanisms.
 SSLsplit fully supports Server Name Indication (SNI) and is able to work with
 RSA, DSA and ECDSA keys and DHE and ECDHE cipher suites.  Depending on the
 version of OpenSSL, SSLsplit supports SSL 3.0, TLS 1.0, TLS 1.1 and TLS 1.2,
@@ -81,20 +85,22 @@ certificate verification vulnerabilities in SSL/TLS stacks.
 SSLsplit implements a number of defences against mechanisms which would
 normally prevent MitM attacks or make them more difficult.
 SSLsplit can deny OCSP requests in a generic way.
-For HTTP and HTTPS connections, SSLsplit removes response headers
-for HPKP in order to prevent server-instructed public key pinning,
-for HSTS to avoid the strict transport security restrictions,
-and Alternate Protocols to prevent switching to QUIC/SPDY.
+For HTTP and HTTPS connections, SSLsplit mangles headers to
+prevent server-instructed public key pinning (HPKP),
+avoid strict transport security restrictions (HSTS),
+avoid Certificate Transparency enforcement (Expect-CT) and
+prevent switching to QUIC/SPDY, HTTP/2 or WebSockets (Upgrade,
+Alternate Protocols).
 HTTP compression, encodings and keep-alive are disabled to make the logs more
 readable.
 .LP
-As an experimental feature, SSLsplit supports STARTTLS and similar mechanisms,
-where a protocol starts on a plain text TCP connection and is later upgraded to
-SSL/TLS through protocol-specific means, such as the STARTTLS command in SMTP.
-SSLsplit supports generic upgrading of TCP connections to SSL.
+Logging options include traditional SSLsplit connect and content log files as
+well as PCAP files and mirroring decrypted traffic to a network interface.
+Additionally, certificates, master secrets and local process information can be
+logged.
 .LP
 In order to maximize the chances that a connection can be successfully split,
-SSLsplit does not verify upstream server certificates.  Instead, all
+SSLsplit does not verify upstream server certificates by default.  Instead, all
 certificates including self-signed are accepted and if the expected hostname
 signalled in SNI is missing from the server certificate, it will be added to
 dynamically forged certificates.
@@ -106,6 +112,24 @@ legitimate router, ARP spoofing, ND spoofing, DNS poisoning, deploying a rogue
 access point (e.g. using hostap mode), physical recabling, malicious VLAN
 reconfiguration or route injection, /etc/hosts modification and so on.
 .SH OPTIONS
+.TP
+.B \-a \fIpemfile\fP
+Use client certificate from \fIpemfile\fP when destination server requests a
+client certificate.
+.B \-A \fIpemfile\fP
+Use private key, certificate and certificate chain from PEM file \fIpemfile\fP
+as leaf certificate instead of generating a leaf certificate on the fly.
+The PEM file must contain a single private key, a single certificate and
+optionally intermediate and root CA certificates to use as certificate chain.
+When using \fB-t\fP, SSLsplit will first attempt to use a matching certificate
+loaded from \fIcertdir\fP.
+If \fB-t\fP is also used and a connection matches any certificate in the
+directory specified with the \fB-t\fP option, that matching certificate is used
+instead, taking precedence over the certificate specified with \fB-A\fP.
+.TP
+.B \-b \fIpemfile\fP
+Use client private key from \fIpemfile\fP when destination server requests a
+client certificate.
 .TP
 .B \-c \fIpemfile\fP
 Use CA certificate from \fIpemfile\fP to sign certificates forged on-the-fly.
@@ -140,11 +164,15 @@ returned by \fB-E\fP.
 List all supported NAT engines available on the system and exit.  See
 NAT ENGINES for a list of NAT engines currently supported by SSLsplit.
 .TP
+.B \-f \fIconffile\fP
+Read configuration from \fIconffile\fP.
+.TP
 .B \-F \fIlogspec\fP
 Log connection content to separate log files with the given path specification
 (see LOG SPECIFICATIONS below).  For each connection, a log file will be
 written, which will contain both directions of data as transmitted.
 Information about the connection will be contained in the filename only.
+Only one of \fB-F\fP, \fB-L\fP and \fB-S\fP may be used (last one wins).
 .TP
 .B \-g \fIpemfile\fP
 Use Diffie-Hellman group parameters from \fIpemfile\fP for Ephemereal
@@ -173,6 +201,11 @@ connect log and enables the respective \fB-F\fP path specification directives.
 \fB-i\fP is available on Mac OS X and FreeBSD; support for other platforms has
 not been implemented yet.
 .TP
+.B \-I \fIif\fP
+Mirror connection content as emulated packets to interface \fIif\fP with
+destination address given by \fB-T\fP.  This option is not available if
+SSLsplit was built without mirroring support.
+.TP
 .B \-j \fIjaildir\fP
 Change the root directory to \fIjaildir\fP using chroot(2) after opening files.
 Note that this has implications for \fBsni\fP \fIproxyspecs\fP.
@@ -193,7 +226,7 @@ no matching certificate in the provided certificate directory.
 .TP
 .B \-K \fIpemfile\fP
 Use private key from \fIpemfile\fP for the leaf certificates forged on-the-fly.
-If \fB-K\fP is not given, SSLsplit will generate a random 1024-bit RSA key.
+If \fB-K\fP is not given, SSLsplit will generate a random 2048 bit RSA key.
 .TP
 .B \-l \fIlogfile\fP
 Log connections to \fIlogfile\fP in a single line per connection format,
@@ -205,6 +238,7 @@ Log connection content to \fIlogfile\fP.  The content log will contain a
 parsable log format with transmitted data, prepended with headers identifying
 the connection and the data length of each logged segment.
 SIGUSR1 will cause \fIlogfile\fP to be re-opened.
+Only one of \fB-F\fP, \fB-L\fP and \fB-S\fP may be used (last one wins).
 .TP
 .B \-m
 When dropping privileges using \fB-u\fP, override the target primary group
@@ -229,7 +263,7 @@ parsable by OpenSSL, or if the method is \fBPOST\fP and the \fBContent-Type\fP
 is \fBapplication/ocsp-request\fP.
 For this to be effective, SSLsplit must be handling traffic destined to the
 port used by the OCSP server.  In particular, SSLsplit must be configured to
-receive traffic to all ports used by OCSP servers of targetted certificates
+receive traffic to all ports used by OCSP servers of targeted certificates
 within the \fIcertdir\fP specified by \fB-t\fP.
 .TP
 .B \-p \fIpidfile\fP
@@ -300,6 +334,7 @@ Log connection content to separate log files under \fIlogdir\fP.  For each
 connection, a log file will be written, which will contain both directions of
 data as transmitted.  Information about the connection will be contained in
 the filename only.
+Only one of \fB-F\fP, \fB-L\fP and \fB-S\fP may be used (last one wins).
 .TP
 .B \-t \fIcertdir\fP
 Use private key, certificate and certificate chain from PEM files in
@@ -309,20 +344,61 @@ A single PEM file must contain a single private key, a single certificate and
 optionally intermediate and root CA certificates to use as certificate chain.
 When using \fB-t\fP, SSLsplit will first attempt to use a matching certificate
 loaded from \fIcertdir\fP.
-If \fB-c\fP and \fB-k\fP are also given, certificates will be forged
+If \fB-A\fP is also given, when there is no match in \fIcertdir\fP, the default
+key, certificate and certificate chain from the PEM file specified with the
+\fB-A\fP option is used instead.
+Otherwise, if \fB-c\fP and \fB-k\fP are also given, certificates will be forged
 on-the-fly for sites matching none of the common names in the certificates
 loaded from \fIcertdir\fP.
 Otherwise, connections matching no certificate will be dropped, or if
 \fB-P\fP is given, passed through without splitting SSL/TLS.
 .TP
-.B \-u
+.B \-T \fIaddr\fP
+Mirror connection content as emulated packets to destination address \fIaddr\fP
+on the interface given by \fB-I\fP.  Only IPv4 target addresses are currently
+supported.  This option is not available if SSLsplit was built without
+mirroring support.
+.TP
+.B \-u \fIuser\fP
 Drop privileges after opening sockets and files by setting the real,
 effective and stored user IDs to \fIuser\fP and loading the appropriate
 primary and ancillary groups.  If \fB-u\fP is not given, SSLsplit will drop
 privileges to the stored UID if EUID != UID (setuid bit scenario), or to
 \fBnobody\fP if running with full \fBroot\fP privileges (EUID == UID == 0).
+User \fIuser\fP needs to be allowed to make outbound TCP connections, and in
+some configurations, to also perform DNS resolution.
+Dropping privileges enables privilege separation, which incurs latency for
+certain options, such as separate per-connection log files.  By using
+\fB-u root\fP, SSLsplit can be run as root without dropping privileges.
 Due to an Apple bug, \fB-u\fP cannot be used with \fBpf\fP proxyspecs on
 Mac OS X.
+.TP
+.B \-x \fIengine\fP
+Use the OpenSSL engine with identifier \fIengine\fP as a default engine.  The
+engine must be available within the OpenSSL ecosystem under the specified
+identifier, that is, they must be loaded from the global OpenSSL configuration.
+If \fIengine\fP is an absolute path, it will be interpreted as path to an
+engine dynamically linked library and loaded by path, regardless of global
+OpenSSL configuration.
+This option is only available if built against a version of OpenSSL with engine
+support.
+.TP
+.B \-X \fIpcapfile\fP
+Log connection content to \fIpcapfile\fP in PCAP format, with emulated TCP, IP
+and Ethernet headers.
+SIGUSR1 will cause \fIpcapfile\fP to be re-opened.
+Only one of \fB-X\fP, \fB-Y\fP and \fB-y\fP may be used (last one wins).
+.TP
+.B \-Y \fIpcapdir\fP
+Log connection content to separate PCAP files under \fIpcapdir\fP.  For each
+connection, a separate PCAP file will be written.
+Only one of \fB-X\fP, \fB-Y\fP and \fB-y\fP may be used (last one wins).
+.TP
+.B \-y \fIpcapspec\fP
+Log connection content to separate PCAP files with the given path specification
+(see LOG SPECIFICATIONS below).  For each connection, a separate PCAP file will
+be written.
+Only one of \fB-X\fP, \fB-Y\fP and \fB-y\fP may be used (last one wins).
 .TP
 .B \-V
 Display version and compiled features information and exit.
@@ -369,7 +445,8 @@ SNI DNS lookup):
 .TP
 \fBhttps\fP
 SSL/TLS interception with HTTP protocol decoding, including the removal of
-HPKP, HSTS and Alternate Protocol response headers.
+HPKP, HSTS, Upgrade and Alternate Protocol response headers.
+This mode currently suppresses WebSockets and HTTP/2.
 .TP
 \fBssl\fP
 SSL/TLS interception without any lower level protocol decoding; decrypted
@@ -377,7 +454,8 @@ connection content is treated as opaque stream of bytes and not modified.
 .TP
 \fBhttp\fP
 Plain TCP connection without SSL/TLS, with HTTP protocol decoding, including
-the removal of HPKP, HSTS and Alternate Protocol response headers.
+the removal of HPKP, HSTS, Upgrade and Alternate Protocol response headers.
+This mode currently suppresses WebSockets and HTTP/2.
 .TP
 \fBtcp\fP
 Plain TCP connection without SSL/TLS and without any lower level protocol
@@ -390,9 +468,6 @@ stream, then automatic upgrade to SSL/TLS interception.
 This is generic, protocol-independent STARTTLS support, that may erroneously
 trigger on byte sequences that look like Client Hello messages even though
 there was no actual STARTTLS command issued.
-This is an experimental feature and may in its current state miss some Client
-Hello messages depending on circumstances.  YMMV.
-Testing and patches highly welcome.
 .TP
 .I listenaddr port
 IPv4 or IPv6 address and port or service name to listen on.  This is the
@@ -416,17 +491,12 @@ Use the Server Name Indication (SNI) hostname sent by the client in the
 Client Hello SSL/TLS message to determine the IP address of the server to
 connect to.  This only works for \fBssl\fP and \fBhttps\fP \fIproxyspecs\fP and
 needs a port or service name as an argument.
-Because this requires DNS lookups, it is preferrable to use NAT engine
+Because this requires DNS lookups, it is preferable to use NAT engine
 lookups (see above), except when that is not possible, such as when there is
 no supported NAT engine or when running \fBsslsplit\fP on a different system
 than the NAT rules redirecting the actual connections.
 Note that when using \fB-j\fP with \fBsni\fP, you may need to prepare
 \fIjaildir\fP to make name resolution work from within the chroot directory.
-.SH SIGNALS
-A running \fBsslsplit\fP accepts SIGINT and SIGQUIT for a clean shutdown and
-SIGUSR1 to re-open the long-living log files (\fB-l\fP and \fB-L\fP).
-Per-connection log files (\fB-S\fP and \fB-F\fP) are not re-opened because
-their filename is specific to the connection.
 .SH "LOG SPECIFICATIONS"
 Log specifications are composed of zero or more printf-style directives;
 ordinary characters are included directly in the output path.
@@ -623,6 +693,20 @@ Fully supported, including IPv6.
 Note that return path filtering (rp_filter) also needs to be disabled on
 interfaces which handle TPROXY redirected traffic.
 .RE
+.SH SIGNALS
+A running \fBsslsplit\fP accepts SIGINT and SIGTERM for a clean shutdown and
+SIGUSR1 to re-open the single-file log files (such as \fB-l\fP, \fB-L\fP and
+\fB-X\fP).  The canonical way to rotate or post-process logs is to rename the
+active log file, send SIGUSR1 to the PID in the PID file given by \fB-p\fP,
+give SSLsplit some time to flush buffers after closing the old file, and then
+post-process the renamed log file.
+Per-connection log files (such as \fB-S\fP and \fB-F\fP) are not re-opened
+because their filename is specific to the connection.
+.SH "EXIT STATUS"
+The \fBsslsplit\fP process will exit with 0 on regular shutdown
+(SIGINT, SIGTERM), and 128 + signal number on controlled shutdown based on
+receiving a different signal such as SIGHUP.  Exit status in the range 1..127
+indicates error conditions.
 .SH EXAMPLES
 Matching the above NAT engine configuration samples, intercept HTTP and HTTPS
 over IPv4 and IPv6 using forged certificates with CA private key \fBca.key\fP
@@ -650,7 +734,7 @@ Intercepting IMAP/IMAPS using the same settings:
          tcp ::1 10143  tcp 127.0.0.1 10143\fP
 .fi
 .LP
-A more targetted setup, HTTPS only, using certificate/chain/key files from
+A more targeted setup, HTTPS only, using certificate/chain/key files from
 \fB/path/to/cert.d\fP and statically redirecting to \fBwww.example.org\fP
 instead of querying a NAT engine:
 .LP
@@ -658,6 +742,17 @@ instead of querying a NAT engine:
 \fBsslsplit -t /path/to/cert.d -l connect.log -S /tmp \\
          https ::1       10443 www.example.org 443 \\
          https 127.0.0.1 10443 www.example.org 443\fP
+.fi
+.LP
+The original example, but using plain ssl and tcp proxyspecs to avoid header
+modifications, and logging to a single PCAP file for post-processing with an
+external tool.  To facilitate log rotation via SIGUSR1, \fB-p\fP is also given,
+so external log rotation tools or scripts can read the PID from the PID file.
+.LP
+.nf
+\fBsslsplit -k ca.key -c ca.crt -X log.pcap -p /var/run/sslsplit.pid \\
+         ssl ::1 10443  ssl 127.0.0.1 10443 \\
+         tcp ::1 10080  tcp 127.0.0.1 10080\fP
 .fi
 .LP
 The original example, but using SSL options optimized for speed by disabling
@@ -712,7 +807,7 @@ authorityKeyIdentifier  = keyid:always,issuer:always
 SSLsplit is able to handle a relatively high number of listeners and
 connections due to a multithreaded, event based architecture based on libevent,
 taking advantage of platform specific select() replacements such as kqueue.
-The main thread handles the listeners and signalling, while a number of worker
+The main thread handles the listeners and signaling, while a number of worker
 threads equal to twice the number of CPU cores is used for handling the actual
 connections in separate event bases, including the CPU-intensive SSL/TLS
 handling.
@@ -721,24 +816,39 @@ Care has been taken to choose well-performing data structures for caching
 certificates and SSL sessions.  Logging is implemented in separate disk writer
 threads to ensure that socket event handling threads don't have to block on
 disk I/O.
-DNS lookups are performed asynchroniously.
+DNS lookups are performed asynchronously.
 SSLsplit uses SSL session caching on both ends to minimize the amount of full
 SSL handshakes, but even then, the limiting factor in handling SSL connections
 are the actual bignum computations.
+.LP
+For high performance and low latency and when running SSLsplit as root or
+otherwise in a privilege separation mode, avoid using options which require a
+privileged operation to be invoked through privilege separation for each
+connection.  These are currently all per-connection log types:
+content log to per-stream file in dir or filespec (\fB-F\fP, \fB-S\fP),
+content log to per-stream PCAP in dir or filespec (\fB-Y\fP, \fB-y\fP), and
+generated or all certificates to files in directory (\fB-w\fP, \fB-W\fP).
+Instead, use the respective single-file variants where available.
+It is possible, albeit not recommended, to bypass the default privilege
+separation when run as root by using \fB-u root\fP, thereby bypassing
+privilege separation entirely.
 .SH "SEE ALSO"
-openssl(1), ciphers(1), speed(1),
+sslsplit.conf(5), openssl(1), ciphers(1), speed(1),
 pf(4), ipfw(8), iptables(8), ip6tables(8), ip(8),
 hostapd(8), arpspoof(8), parasite6(8), yersinia(8),
 .I https://www.roe.ch/SSLsplit
 .SH AUTHORS
 SSLsplit was written by Daniel Roethlisberger <daniel@roe.ch>.
+SSLsplit is currently maintained by Daniel Roethlisberger and Soner Tari.
 
 The following individuals have contributed code or documentation, in
 chronological order of their first contribution:
 Steve Wills, Landon Fuller, Wayne Jensen, Rory McNamara, Alexander Neumann,
 Adam Jacob Muller, Richard Poole, Maciej Kotowicz, Eun Soo Park, Christian
-Groschupp, Alexander Savchenkov, Soner Tari, Petr Vanek, Hilko Bengen and
-Philip Duldig.
+Groschupp, Alexander Savchenkov, Soner Tari, Petr Vanek, Hilko Bengen,
+Philip Duldig, Levente Polyak, Nick French, Cihan Komecoglu and Sergey Pinaev.
+
+SSLsplit contains work sponsored by HackerOne.
 .SH BUGS
 Use Github for submission of bug reports or patches:
 .LP

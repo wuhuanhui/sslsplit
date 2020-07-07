@@ -1,28 +1,29 @@
-/*
+/*-
  * SSLsplit - transparent SSL/TLS interception
- * Copyright (c) 2009-2018, Daniel Roethlisberger <daniel@roe.ch>
- * All rights reserved.
  * https://www.roe.ch/SSLsplit
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * Copyright (c) 2009-2019, Daniel Roethlisberger <daniel@roe.ch>.
+ * All rights reserved.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "sys.h"
@@ -41,7 +42,7 @@
 #include <check.h>
 
 #define TARGETDIR "extra/pki/targets"
-static char template[] = "/tmp/" BNAME ".test.XXXXXX";
+static char template[] = "/tmp/sslsplit.test.XXXXXX";
 static char *basedir;
 static char *file, *lfile, *dir, *ldir, *notexist;
 
@@ -174,6 +175,49 @@ START_TEST(sys_mkpath_01)
 }
 END_TEST
 
+START_TEST(sys_realdir_01)
+{
+	char *rd;
+
+	rd = sys_realdir("./extra/../sys.t.c");
+	fail_unless(!!rd, "sys_realdir failed");
+	fail_unless(!!strstr(rd, "/sys.t.c"), "filename not found");
+	fail_unless(!strstr(rd, "/extra/"), "extra in path");
+	fail_unless(!strstr(rd, "/../"), "dot-dot in path");
+	free(rd);
+}
+END_TEST
+
+START_TEST(sys_realdir_02)
+{
+	char *rd;
+
+	rd = sys_realdir("/foo/bar/baz");
+	fail_unless(!rd, "sys_realdir did not fail");
+	fail_unless(errno == ENOENT, "errno not ENOENT");
+}
+END_TEST
+
+START_TEST(sys_realdir_03)
+{
+	char *rd;
+
+	rd = sys_realdir("foobarbaz");
+	fail_unless(!!rd, "sys_realdir failed");
+	fail_unless(!!strstr(rd, "/foobarbaz"), "filename not found or dir");
+	free(rd);
+}
+END_TEST
+
+START_TEST(sys_realdir_04)
+{
+	char *rd;
+
+	rd = sys_realdir("");
+	fail_unless(!rd, "sys_realdir did not fail");
+}
+END_TEST
+
 int
 sys_dir_eachfile_cb(UNUSED const char *fn, void *arg)
 {
@@ -291,6 +335,13 @@ sys_suite(void)
 	tc = tcase_create("sys_mkpath");
 	tcase_add_unchecked_fixture(tc, sys_mkpath_setup, sys_mkpath_teardown);
 	tcase_add_test(tc, sys_mkpath_01);
+	suite_add_tcase(s, tc);
+
+	tc = tcase_create("sys_realdir");
+	tcase_add_test(tc, sys_realdir_01);
+	tcase_add_test(tc, sys_realdir_02);
+	tcase_add_test(tc, sys_realdir_03);
+	tcase_add_test(tc, sys_realdir_04);
 	suite_add_tcase(s, tc);
 
 	tc = tcase_create("sys_dir_eachfile");
